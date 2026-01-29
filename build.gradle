@@ -1,0 +1,61 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.grip.graphql'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Burp Montoya API
+    implementation 'net.portswigger.burp.extensions:montoya-api:2023.12.1'
+
+    // GraphQL Java for schema parsing
+    implementation 'com.graphql-java:graphql-java:21.3'
+
+    // Gson for JSON handling
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // RSyntaxTextArea for syntax highlighting
+    implementation 'com.fifesoft:rsyntaxtextarea:3.4.0'
+
+    // Testing
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.1'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+jar {
+    archiveBaseName = 'graphql-grip'
+
+    // Create fat JAR with all dependencies
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes(
+            'Extension-Name': 'GraphQL Grip',
+            'Extension-Version': version,
+            'Implementation-Title': 'GraphQL Grip',
+            'Implementation-Version': version
+        )
+    }
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}

@@ -66,7 +66,7 @@ Fingerprints Apollo Server, Hasura, GraphQL Yoga, Graphene, graphql-java, Junipe
 
 ## Schema Reconstruction
 
-When introspection is blocked, Grip probes blindly. It tests 64 field names per request using aliases, parses "Did you mean X?" suggestions from errors, traverses nested types breadth-first, and infers return types from error messages. Works against Apollo, Hasura, Hot Chocolate, Sangria, Graphene, Juniper, AppSync, PostGraphile, Relay, Netflix DGS, and others.
+When introspection is blocked, Grip probes blindly.
 
 ## Building from Source
 

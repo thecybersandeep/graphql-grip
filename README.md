@@ -7,6 +7,9 @@
 
 A Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, and generate attack payloads directly from Repeater.
 
+<img width="1624" height="966" alt="image" src="https://github.com/user-attachments/assets/59b997fb-a4c5-43c8-a44a-970a6c39822b" />
+
+
 ## What It Does
 
 **Schema Analysis** extracts GraphQL schemas through introspection or blind reconstruction when introspection is disabled. The fingerprinter identifies backend implementations like Apollo, Hasura, Yoga, graphql-java, and others.

@@ -7,7 +7,14 @@
 
 A Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, and generate attack payloads directly from Repeater.
 
+**Main tab:** `"Schema Analysis & Testing"`
+
 <img width="1624" height="966" alt="image" src="https://github.com/user-attachments/assets/59b997fb-a4c5-43c8-a44a-970a6c39822b" />
+
+**Repeater tab:** `"Attack Payload Generator"`
+
+<img width="1365" height="966" alt="image" src="https://github.com/user-attachments/assets/594a6e7e-2af4-41ab-a47b-0778a6fee14a" />
+
 
 
 ## What It Does

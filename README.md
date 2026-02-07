@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.0.0-green.svg)](../../releases)
 
-Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, generate attack payloads — all from Repeater.
+Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, generate attack payloads .. all from Repeater.
 
 **Main tab:** `Schema Analysis & Testing`
 

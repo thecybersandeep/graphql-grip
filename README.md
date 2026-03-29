@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.0.1-green.svg)](../../releases)
 
-Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, generate attack payloads — all from within Burp.
+Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, generate attack payloads : all from within Burp.
 
 **Main tab:** `Schema Analysis & Testing`
 
@@ -106,13 +106,13 @@ src/main/java/com/grip/graphql/
 
 ### v1.0.1
 
-Large schemas (thousands of types) no longer freeze the UI — the tree loads lazily with async pagination, and file imports parse in the background.
+Large schemas (thousands of types) no longer freeze the UI the tree loads lazily with async pagination, and file imports parse in the background.
 
 Auth headers (tokens, cookies, custom headers) from the original request now carry through automatically to introspection and schema tab requests. Transport headers like Host and Content-Length are skipped.
 
 Fixed scalar and enum return types generating empty `{ }` selection sets. Arguments now included for subscriptions. Send to Repeater and Intruder works correctly with the full original request template.
 
-HTTP client rate limiting, timeout handling, and auth error checking cleaned up — no more duplicate header application or scattered timestamp tracking.
+HTTP client rate limiting, timeout handling, and auth error checking cleaned up  no more duplicate header application or scattered timestamp tracking.
 
 Graph view edge rendering now uses a single pass. Schemas over 500 types skip the graph view to stay responsive.
 

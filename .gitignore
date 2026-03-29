@@ -1,0 +1,30 @@
+# Build output
+build/
+bin/
+out/
+
+# Gradle cache
+.gradle/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.classpath
+*.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Compiled class files
+*.class
+
+# Package files
+*.jar
+!gradle/wrapper/gradle-wrapper.jar

@@ -17,11 +17,11 @@ Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint ba
 
 ## What It Does
 
-**Schema Analysis** — runs introspection to pull the full schema. Falls back to blind reconstruction if introspection is off. Also fingerprints the backend (Apollo, Hasura, Yoga, graphql-java, etc.).
+**Schema Analysis** : runs introspection to pull the full schema. Falls back to blind reconstruction if introspection is off. Also fingerprints the backend (Apollo, Hasura, Yoga, graphql-java, etc.).
 
-**Attack Generation** — lives in the Repeater tab. Pick an attack type, tweak params, hit send. Covers DoS (alias overloading, field duplication, circular queries), mutation abuse, directive probing, and introspection bypass techniques.
+**Attack Generation** : lives in the Repeater tab. Pick an attack type, tweak params, hit send. Covers DoS (alias overloading, field duplication, circular queries), mutation abuse, directive probing, and introspection bypass techniques.
 
-**Endpoint Discovery** — finds GraphQL endpoints and detects exposed GraphiQL/Playground interfaces.
+**Endpoint Discovery** : finds GraphQL endpoints and detects exposed GraphiQL/Playground interfaces.
 
 ## Installation
 

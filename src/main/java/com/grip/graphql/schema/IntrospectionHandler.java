@@ -155,7 +155,8 @@ public class IntrospectionHandler {
                 }
             } catch (GripHttpClient.GripAuthException e) {
                 throw new CompletionException(e);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                httpClient.logError("Full introspection failed for " + endpoint, e);
             }
 
             try {
@@ -170,7 +171,8 @@ public class IntrospectionHandler {
                 }
             } catch (GripHttpClient.GripAuthException e) {
                 throw new CompletionException(e);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                httpClient.logError("Minimal introspection failed for " + endpoint, e);
             }
 
             return null;
@@ -191,6 +193,7 @@ public class IntrospectionHandler {
             } catch (GripHttpClient.GripAuthException e) {
                 throw new CompletionException(e);
             } catch (Exception e) {
+                httpClient.logError("Introspection availability check failed for " + endpoint, e);
                 return false;
             }
         }, executor).orTimeout(60, TimeUnit.SECONDS);
@@ -430,7 +433,7 @@ public class IntrospectionHandler {
                     GripDirective.Location loc = GripDirective.Location.valueOf(locElement.getAsString());
                     directive.addLocation(loc);
                 } catch (IllegalArgumentException e) {
-
+                    httpClient.logError("Unsupported directive location " + locElement, e);
                 }
             }
         }

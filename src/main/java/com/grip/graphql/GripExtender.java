@@ -7,6 +7,7 @@ import burp.api.montoya.extension.ExtensionUnloadingHandler;
 public class GripExtender implements BurpExtension, ExtensionUnloadingHandler {
 
     private static final String EXTENSION_NAME = "GraphQL Grip";
+    private static final String EXTENSION_VERSION = "2.0.0";
     private GripCore gripCore;
 
     @Override
@@ -21,7 +22,7 @@ public class GripExtender implements BurpExtension, ExtensionUnloadingHandler {
         try {
             this.gripCore.initialize();
             api.logging().logToOutput("[GraphQL Grip] Extension loaded successfully");
-            api.logging().logToOutput("[GraphQL Grip] Version 1.0.1");
+            api.logging().logToOutput("[GraphQL Grip] Version " + EXTENSION_VERSION);
         } catch (Exception e) {
             api.logging().logToError("[GraphQL Grip] Failed to initialize: " + e.getMessage());
             throw new RuntimeException("Failed to initialize GraphQL Grip", e);

@@ -1,6 +1,7 @@
 package com.grip.graphql.security;
 
 import com.grip.graphql.http.GripHttpClient;
+import com.grip.graphql.http.GraphQLResponseAnalyzer;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -52,37 +53,48 @@ public class GripEngineFingerprinter {
 
     public CompletableFuture<EngineResult> fingerprint(String endpoint) {
         return CompletableFuture.supplyAsync(() -> {
-            log("[*] Starting engine fingerprinting...");
-
-            if (!verifyGraphQLEndpoint(endpoint)) {
-                log("[-] Not a valid GraphQL endpoint");
-                return new EngineResult("Unknown", "None", "Could not verify GraphQL endpoint");
+            try {
+                return fingerprintEndpoint(endpoint);
+            } catch (Exception e) {
+                httpClient.logError("Engine fingerprinting failed for " + endpoint, e);
+                log("[-] Engine fingerprinting failed: " + e.getMessage());
+                return new EngineResult("Unknown", "None", "Fingerprinting failed: " + e.getMessage());
             }
+        }, httpClient.getExecutor());
+    }
 
-            log("[+] GraphQL endpoint confirmed");
+    private EngineResult fingerprintEndpoint(String endpoint) {
+        log("[*] Starting engine fingerprinting...");
 
-            List<DetectionProbe> probes = buildDetectionProbes();
+        if (!verifyGraphQLEndpoint(endpoint)) {
+            log("[-] Not a valid GraphQL endpoint");
+            return new EngineResult("Unknown", "None", "Could not verify GraphQL endpoint");
+        }
 
-            for (DetectionProbe probe : probes) {
-                try {
-                    String response = sendProbeQuery(endpoint, probe.query);
-                    if (response != null && probe.matcher.matches(response)) {
-                        log("[+] Detected: " + probe.engineName);
-                        return new EngineResult(probe.engineName, "High", probe.evidence);
-                    }
-                } catch (Exception e) {
-                    log("Probe failed for " + probe.engineName + ": " + e.getMessage());
+        log("[+] GraphQL endpoint confirmed");
+
+        List<DetectionProbe> probes = buildDetectionProbes();
+
+        for (DetectionProbe probe : probes) {
+            try {
+                String response = sendProbeQuery(endpoint, probe.query);
+                if (response != null && probe.matcher.matches(response)) {
+                    log("[+] Detected: " + probe.engineName);
+                    return new EngineResult(probe.engineName, "High", probe.evidence);
                 }
+            } catch (Exception e) {
+                log("Probe failed for " + probe.engineName + ": " + e.getMessage());
+                httpClient.logError("Engine probe failed for " + probe.engineName + " at " + endpoint, e);
             }
+        }
 
-            EngineResult secondary = trySecondaryDetection(endpoint);
-            if (secondary != null) {
-                return secondary;
-            }
+        EngineResult secondary = trySecondaryDetection(endpoint);
+        if (secondary != null) {
+            return secondary;
+        }
 
-            log("[-] Could not determine engine");
-            return new EngineResult("Unknown", "None", "No matching signatures found");
-        });
+        log("[-] Could not determine engine");
+        return new EngineResult("Unknown", "None", "No matching signatures found");
     }
 
     private boolean verifyGraphQLEndpoint(String endpoint) {
@@ -95,18 +107,14 @@ public class GripEngineFingerprinter {
                 return false;
             }
 
-            String body = response.response().bodyToString();
-
-            if (body.contains("\"data\"") || body.contains("\"errors\"")) {
-                return true;
-            }
-
-            if (body.contains("__typename")) {
-                return true;
-            }
-
-            return false;
+            GraphQLResponseAnalyzer.Analysis analysis =
+                    GraphQLResponseAnalyzer.analyzeEndpointProbe(
+                            response.response().statusCode(),
+                            response.response().headerValue("Content-Type"),
+                            response.response().bodyToString());
+            return analysis.isGraphQL();
         } catch (Exception e) {
+            httpClient.logError("GraphQL endpoint verification failed for " + endpoint, e);
             return false;
         }
     }
@@ -120,7 +128,8 @@ public class GripEngineFingerprinter {
             if (response != null && response.response() != null) {
                 return response.response().bodyToString();
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            httpClient.logError("Engine probe request failed for " + endpoint, e);
         }
         return null;
     }
@@ -254,7 +263,9 @@ public class GripEngineFingerprinter {
                             return "Query".equals(data.get("__typename").getAsString());
                         }
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    httpClient.logError("Dgraph fingerprint response parsing failed", e);
+                }
                 return false;
             },
             "Dgraph cascade directive support"
@@ -339,7 +350,9 @@ public class GripEngineFingerprinter {
                             }
                         }
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    httpClient.logError("Directus fingerprint response parsing failed", e);
+                }
                 return false;
             },
             "Directus error code"
@@ -397,7 +410,8 @@ public class GripEngineFingerprinter {
                 }
             }
 
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            httpClient.logError("Secondary engine detection failed for " + endpoint, e);
         }
 
         return null;

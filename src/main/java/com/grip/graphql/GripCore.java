@@ -5,6 +5,7 @@ import com.grip.graphql.api.GripModule;
 import com.grip.graphql.event.GripEventBus;
 import com.grip.graphql.http.GripHttpClient;
 import com.grip.graphql.ui.GripMainTab;
+import com.grip.graphql.ui.GripSettingsPanel;
 import com.grip.graphql.ui.GripTheme;
 import com.grip.graphql.ui.GripContextMenu;
 import com.grip.graphql.editor.GripRequestEditorProvider;
@@ -47,6 +48,8 @@ public class GripCore {
 
         mainTab = new GripMainTab(this);
         api.userInterface().registerSuiteTab("GraphQL Grip", mainTab);
+
+        api.userInterface().registerSettingsPanel(new GripSettingsPanel(api, config, theme));
 
         api.userInterface().registerContextMenuItemsProvider(new GripContextMenu(this));
 

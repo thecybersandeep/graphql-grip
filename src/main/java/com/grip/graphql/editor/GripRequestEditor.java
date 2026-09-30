@@ -1,6 +1,7 @@
 package com.grip.graphql.editor;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ToolType;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.ui.Selection;
@@ -9,13 +10,16 @@ import burp.api.montoya.ui.editor.extension.ExtensionProvidedHttpRequestEditor;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.grip.graphql.GripConfig;
 import com.grip.graphql.GripCore;
 import com.grip.graphql.ui.GripTheme;
 
 import javax.swing.*;
 import java.awt.*;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
@@ -26,6 +30,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     private final MontoyaApi api;
     private final GripCore core;
     private final GripTheme theme;
+    private final boolean repeaterContext;
 
     private JPanel mainPanel;
     private JTextArea queryArea;
@@ -33,19 +38,13 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     private HttpRequest currentRequest;
     private String originalQuery;
     private String originalRequestBody;
+    private String initialEditorContent;
     private String currentAttackMode = "query";
 
     private String extractedFieldName = "__typename";
     private String extractedFieldCall = null;
     private String extractedOperationType = "query";
     private String extractedMutationName = null;
-
-    private JSpinner aliasCountSpinner;
-    private JSpinner batchCountSpinner;
-    private JSpinner fieldDupCountSpinner;
-    private JSpinner directiveCountSpinner;
-    private JSpinner depthCountSpinner;
-    private JSpinner fragmentCountSpinner;
 
     private int aliasCount = 100;
     private int batchCount = 10;
@@ -63,6 +62,8 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         this.api = api;
         this.core = core;
         this.theme = core.getTheme();
+        this.repeaterContext = context != null && context.toolSource() != null &&
+                context.toolSource().isFromTool(ToolType.REPEATER);
         loadConfigFromPrefs();
         initializeUI();
     }
@@ -70,22 +71,22 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     private void loadConfigFromPrefs() {
 
         Integer saved;
-        saved = core.getConfig().getInteger("grip.attack.aliases");
+        saved = core.getConfig().getInteger(GripConfig.ATTACK_ALIAS_COUNT);
         if (saved != null) aliasCount = saved;
 
-        saved = core.getConfig().getInteger("grip.attack.batch");
+        saved = core.getConfig().getInteger(GripConfig.ATTACK_BATCH_COUNT);
         if (saved != null) batchCount = saved;
 
-        saved = core.getConfig().getInteger("grip.attack.fields");
+        saved = core.getConfig().getInteger(GripConfig.ATTACK_FIELD_COUNT);
         if (saved != null) fieldDupCount = saved;
 
-        saved = core.getConfig().getInteger("grip.attack.directives");
+        saved = core.getConfig().getInteger(GripConfig.ATTACK_DIRECTIVE_COUNT);
         if (saved != null) directiveCount = saved;
 
-        saved = core.getConfig().getInteger("grip.attack.depth");
+        saved = core.getConfig().getInteger(GripConfig.ATTACK_DEPTH_COUNT);
         if (saved != null) depthCount = saved;
 
-        saved = core.getConfig().getInteger("grip.attack.fragments");
+        saved = core.getConfig().getInteger(GripConfig.ATTACK_FRAGMENT_COUNT);
         if (saved != null) fragmentCount = saved;
     }
 
@@ -100,33 +101,11 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         titleLabel.setFont(theme.getFont(Font.BOLD, 16));
         titleLabel.setForeground(GripTheme.Colors.ACCENT);
 
-        JPanel headerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
-        JButton saveAllBtn = new JButton("Save All");
-        saveAllBtn.setBackground(GripTheme.Colors.ACCENT);
-        saveAllBtn.setForeground(Color.WHITE);
-        saveAllBtn.setOpaque(true);
-        saveAllBtn.setBorderPainted(false);
-        saveAllBtn.setFocusPainted(false);
-        saveAllBtn.addActionListener(e -> {
-            saveConfigToPrefs();
-            statusLabel.setText("Settings saved to Burp preferences!");
-        });
-
-        JButton resetAllBtn = new JButton("Reset All");
-        resetAllBtn.addActionListener(e -> {
-            resetConfigToDefaults();
-            statusLabel.setText("Settings reset to defaults");
-        });
-
-        headerButtons.add(saveAllBtn);
-        headerButtons.add(resetAllBtn);
-
         statusLabel = new JLabel("Select an attack pattern to modify the request");
         statusLabel.setFont(theme.getNormalFont());
 
         JPanel titleRow = new JPanel(new BorderLayout());
         titleRow.add(titleLabel, BorderLayout.WEST);
-        titleRow.add(headerButtons, BorderLayout.EAST);
 
         headerPanel.add(titleRow, BorderLayout.NORTH);
         headerPanel.add(new JSeparator(), BorderLayout.CENTER);
@@ -194,45 +173,6 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         api.userInterface().applyThemeToComponent(mainPanel);
     }
 
-    private JPanel createSpinnerRow(String label, JSpinner spinner) {
-        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        JLabel lbl = new JLabel(label);
-        lbl.setFont(theme.getNormalFont());
-        row.add(lbl);
-        row.add(spinner);
-        return row;
-    }
-
-    private void saveConfigToPrefs() {
-
-        core.getConfig().setInteger("grip.attack.aliases", aliasCount);
-        core.getConfig().setInteger("grip.attack.batch", batchCount);
-        core.getConfig().setInteger("grip.attack.fields", fieldDupCount);
-        core.getConfig().setInteger("grip.attack.directives", directiveCount);
-        core.getConfig().setInteger("grip.attack.depth", depthCount);
-        core.getConfig().setInteger("grip.attack.fragments", fragmentCount);
-        statusLabel.setText("Config saved!");
-    }
-
-    private void resetConfigToDefaults() {
-
-        aliasCount = 100;
-        batchCount = 10;
-        fieldDupCount = 500;
-        directiveCount = 50;
-        depthCount = 10;
-        fragmentCount = 50;
-
-        if (aliasCountSpinner != null) aliasCountSpinner.setValue(aliasCount);
-        if (batchCountSpinner != null) batchCountSpinner.setValue(batchCount);
-        if (fieldDupCountSpinner != null) fieldDupCountSpinner.setValue(fieldDupCount);
-        if (directiveCountSpinner != null) directiveCountSpinner.setValue(directiveCount);
-        if (depthCountSpinner != null) depthCountSpinner.setValue(depthCount);
-        if (fragmentCountSpinner != null) fragmentCountSpinner.setValue(fragmentCount);
-
-        statusLabel.setText("Config reset to defaults");
-    }
-
     private JPanel createDosPanel() {
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
@@ -242,17 +182,12 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         aliasSection.setBorder(BorderFactory.createTitledBorder("Alias/Width Attacks"));
         aliasSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        aliasCountSpinner = new JSpinner(new SpinnerNumberModel(aliasCount, 10, 10000, 50));
-        aliasCountSpinner.addChangeListener(e -> aliasCount = (Integer) aliasCountSpinner.getValue());
-        JPanel aliasSpinnerRow = createSpinnerRow("Aliases:", aliasCountSpinner);
-
         JPanel aliasButtons = new JPanel(new GridLayout(1, 2, 5, 5));
         addAttackButton(aliasButtons, "Alias Overloading", "N aliased copies of field", e -> applyAliasOverloading());
         addAttackButton(aliasButtons, "Width Attack", "N different __type queries", e -> applyWidthAttack());
 
-        aliasSection.add(aliasSpinnerRow, BorderLayout.NORTH);
         aliasSection.add(aliasButtons, BorderLayout.CENTER);
-        aliasSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+        aliasSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(aliasSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -260,16 +195,11 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         fieldSection.setBorder(BorderFactory.createTitledBorder("Field Duplication"));
         fieldSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        fieldDupCountSpinner = new JSpinner(new SpinnerNumberModel(fieldDupCount, 50, 10000, 100));
-        fieldDupCountSpinner.addChangeListener(e -> fieldDupCount = (Integer) fieldDupCountSpinner.getValue());
-        JPanel fieldSpinnerRow = createSpinnerRow("Fields:", fieldDupCountSpinner);
-
         JPanel fieldButtons = new JPanel(new GridLayout(1, 1, 5, 5));
         addAttackButton(fieldButtons, "Field Duplication", "N aliased fields (each = separate resolution)", e -> applyFieldDuplication());
 
-        fieldSection.add(fieldSpinnerRow, BorderLayout.NORTH);
         fieldSection.add(fieldButtons, BorderLayout.CENTER);
-        fieldSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+        fieldSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(fieldSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -277,17 +207,12 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         depthSection.setBorder(BorderFactory.createTitledBorder("Depth Attacks"));
         depthSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        depthCountSpinner = new JSpinner(new SpinnerNumberModel(depthCount, 3, 100, 5));
-        depthCountSpinner.addChangeListener(e -> depthCount = (Integer) depthCountSpinner.getValue());
-        JPanel depthSpinnerRow = createSpinnerRow("Depth:", depthCountSpinner);
-
         JPanel depthButtons = new JPanel(new GridLayout(1, 2, 5, 5));
         addAttackButton(depthButtons, "Deep Recursion", "N-level nested query", e -> applyDeepRecursion());
         addAttackButton(depthButtons, "Circular Introspection", "N-level nested introspection", e -> applyCircularIntrospection());
 
-        depthSection.add(depthSpinnerRow, BorderLayout.NORTH);
         depthSection.add(depthButtons, BorderLayout.CENTER);
-        depthSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+        depthSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(depthSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -295,16 +220,11 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         fragSection.setBorder(BorderFactory.createTitledBorder("Fragment Overloading"));
         fragSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        fragmentCountSpinner = new JSpinner(new SpinnerNumberModel(fragmentCount, 10, 500, 10));
-        fragmentCountSpinner.addChangeListener(e -> fragmentCount = (Integer) fragmentCountSpinner.getValue());
-        JPanel fragSpinnerRow = createSpinnerRow("Fragments:", fragmentCountSpinner);
-
         JPanel fragButtons = new JPanel(new GridLayout(1, 1, 5, 5));
         addAttackButton(fragButtons, "Fragment Overloading", "N unique fragment spreads", e -> applyFragmentOverloading());
 
-        fragSection.add(fragSpinnerRow, BorderLayout.NORTH);
         fragSection.add(fragButtons, BorderLayout.CENTER);
-        fragSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+        fragSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(fragSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -312,19 +232,14 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         batchSection.setBorder(BorderFactory.createTitledBorder("Batching Attacks"));
         batchSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        batchCountSpinner = new JSpinner(new SpinnerNumberModel(batchCount, 2, 1000, 5));
-        batchCountSpinner.addChangeListener(e -> batchCount = (Integer) batchCountSpinner.getValue());
-        JPanel batchSpinnerRow = createSpinnerRow("Batch Size:", batchCountSpinner);
-
         JPanel batchButtons = new JPanel(new GridLayout(2, 2, 5, 5));
         addAttackButton(batchButtons, "Simple Batch", "N identical queries in array", e -> applyBatchQuery());
         addAttackButton(batchButtons, "Mixed Batch", "Query + introspection alternating", e -> applyMixedBatch());
         addAttackButton(batchButtons, "Incremental Batch", "Test batch size limits", e -> applyIncrementalBatch());
         addAttackButton(batchButtons, "Batch with Vars", "N queries with unique operationName", e -> applyBatchWithVariables());
 
-        batchSection.add(batchSpinnerRow, BorderLayout.NORTH);
         batchSection.add(batchButtons, BorderLayout.CENTER);
-        batchSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 100));
+        batchSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
         mainPanel.add(batchSection);
 
         mainPanel.add(Box.createVerticalGlue());
@@ -355,15 +270,11 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         aliasSection.setBorder(BorderFactory.createTitledBorder("Aliased Mutations"));
         aliasSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JPanel aliasInfo = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        aliasInfo.add(new JLabel("Uses Aliases spinner from DoS tab"));
-
         JPanel aliasButtons = new JPanel(new GridLayout(1, 1, 5, 5));
         addAttackButton(aliasButtons, "Aliased Mutations", "mutation { m0: field, m1: field... }", e -> applyAliasedMutations());
 
-        aliasSection.add(aliasInfo, BorderLayout.NORTH);
         aliasSection.add(aliasButtons, BorderLayout.CENTER);
-        aliasSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 70));
+        aliasSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(aliasSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -371,16 +282,12 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         batchSection.setBorder(BorderFactory.createTitledBorder("Batch Mutations"));
         batchSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JPanel batchInfo = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        batchInfo.add(new JLabel("Uses Batch spinner from DoS tab"));
-
         JPanel batchButtons = new JPanel(new GridLayout(1, 2, 5, 5));
         addAttackButton(batchButtons, "Batch Mutations", "[{mutation}, {mutation}...] array", e -> applyBatchMutations());
         addAttackButton(batchButtons, "Mixed Batch", "Mutations + queries interleaved", e -> applyMixedMutationBatch());
 
-        batchSection.add(batchInfo, BorderLayout.NORTH);
         batchSection.add(batchButtons, BorderLayout.CENTER);
-        batchSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 70));
+        batchSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(batchSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -388,15 +295,11 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         fragSection.setBorder(BorderFactory.createTitledBorder("Mutation Fragments"));
         fragSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JPanel fragInfo = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        fragInfo.add(new JLabel("Uses Fragments spinner from DoS tab"));
-
         JPanel fragButtons = new JPanel(new GridLayout(1, 1, 5, 5));
         addAttackButton(fragButtons, "Mutation Fragments", "fragment MF0..MFn on Mutation { __typename }", e -> applyMutationFragments());
 
-        fragSection.add(fragInfo, BorderLayout.NORTH);
         fragSection.add(fragButtons, BorderLayout.CENTER);
-        fragSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 70));
+        fragSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(fragSection);
 
         mainPanel.add(Box.createVerticalGlue());
@@ -508,18 +411,13 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         overloadSection.setBorder(BorderFactory.createTitledBorder("Directive Overloading"));
         overloadSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        directiveCountSpinner = new JSpinner(new SpinnerNumberModel(directiveCount, 10, 500, 10));
-        directiveCountSpinner.addChangeListener(e -> directiveCount = (Integer) directiveCountSpinner.getValue());
-        JPanel dirSpinnerRow = createSpinnerRow("Directives:", directiveCountSpinner);
-
         JPanel overloadButtons = new JPanel(new GridLayout(1, 3, 5, 5));
         addAttackButton(overloadButtons, "@include Overload", "field @include(if:true)...", e -> applyDirectiveOverloading("include"));
         addAttackButton(overloadButtons, "@skip Overload", "field @skip(if:false)...", e -> applyDirectiveOverloading("skip"));
         addAttackButton(overloadButtons, "Mixed Directives", "@include/@skip alternating", e -> applyMixedDirectives());
 
-        overloadSection.add(dirSpinnerRow, BorderLayout.NORTH);
         overloadSection.add(overloadButtons, BorderLayout.CENTER);
-        overloadSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+        overloadSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         mainPanel.add(overloadSection);
         mainPanel.add(Box.createVerticalStrut(GripTheme.SPACING_SM));
 
@@ -728,7 +626,10 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
             new GripTheme.RoundedBorder(theme.getBorder(), GripTheme.CORNER_RADIUS_SM, 1),
             BorderFactory.createEmptyBorder(GripTheme.SPACING_SM, GripTheme.SPACING_MD, GripTheme.SPACING_SM, GripTheme.SPACING_MD)
         ));
-        btn.addActionListener(action);
+        btn.addActionListener(event -> {
+            loadConfigFromPrefs();
+            action.actionPerformed(event);
+        });
         panel.add(btn);
     }
 
@@ -1546,35 +1447,22 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     private void convertToGet() {
         currentAttackMode = "get";
         String query = originalQuery != null ? originalQuery : "query { __typename }";
-
-        String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        String preview = "GET /graphql?query=" + encoded;
-        if (preview.length() > 500) {
-            preview = preview.substring(0, 500) + "...(truncated)";
-        }
-        queryArea.setText(preview);
-        statusLabel.setText("GET Mode: Query URL-encoded in ?query= parameter (edit raw query above)");
+        queryArea.setText(query);
+        statusLabel.setText("GET Mode: query will be URL-encoded into the query parameter");
     }
 
     private void convertToUrlEncoded() {
         currentAttackMode = "urlencoded";
         String query = originalQuery != null ? originalQuery : "query { __typename }";
-
-        String encoded = "query=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
-        queryArea.setText(encoded);
-        statusLabel.setText("URL-Encoded: Content-Type: application/x-www-form-urlencoded");
+        queryArea.setText(query);
+        statusLabel.setText("URL-Encoded: query will be encoded as form data");
     }
 
     private void convertToMultipart() {
         currentAttackMode = "multipart";
         String query = originalQuery != null ? originalQuery : "query { __typename }";
-
-        String boundary = "----GripBoundary" + System.currentTimeMillis();
-        String multipart = "--" + boundary + "\r\n" +
-                "Content-Disposition: form-data; name=\"query\"\r\n\r\n" +
-                query + "\r\n--" + boundary + "--";
-        queryArea.setText(multipart);
-        statusLabel.setText("Multipart: Content-Type: multipart/form-data; boundary=" + boundary);
+        queryArea.setText(query);
+        statusLabel.setText("Multipart: query will be wrapped in a form-data part");
     }
 
     private void applyPersistedQueryHash() {
@@ -1609,66 +1497,91 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
     private String extractQueryFromRequest(HttpRequest request) {
         if (request == null) return null;
-
-        String body = request.bodyToString();
-        if (body == null || body.isEmpty()) {
-            String path = request.path();
-            if (path.contains("query=")) {
-                int start = path.indexOf("query=") + 6;
-                int end = path.indexOf("&", start);
-                if (end == -1) end = path.length();
-                try {
-                    return java.net.URLDecoder.decode(path.substring(start, end), StandardCharsets.UTF_8);
-                } catch (Exception e) {
-                    return path.substring(start, end);
-                }
-            }
-            return null;
-        }
-
-        try {
-            if (body.trim().startsWith("{")) {
-                JsonObject json = JsonParser.parseString(body).getAsJsonObject();
-                if (json.has("query")) {
-                    return json.get("query").getAsString();
-                }
-            } else if (body.trim().startsWith("[")) {
-                JsonArray arr = JsonParser.parseString(body).getAsJsonArray();
-                if (arr.size() > 0 && arr.get(0).isJsonObject()) {
-                    JsonObject first = arr.get(0).getAsJsonObject();
-                    if (first.has("query")) {
-                        return first.get("query").getAsString();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            if (body.contains("query=")) {
-                int start = body.indexOf("query=") + 6;
-                int end = body.indexOf("&", start);
-                if (end == -1) end = body.length();
-                try {
-                    return java.net.URLDecoder.decode(body.substring(start, end), StandardCharsets.UTF_8);
-                } catch (Exception ex) {
-                    return body.substring(start, end);
-                }
-            }
-        }
-        return null;
+        return GraphQLRequestDetector.extractQuery(
+                request.method(),
+                request.path(),
+                request.headerValue("Content-Type"),
+                request.bodyToString());
     }
 
     private boolean isGraphQLRequest(HttpRequest request) {
         if (request == null) return false;
+        return GraphQLRequestDetector.isGraphQLRequest(
+                request.method(),
+                request.path(),
+                request.headerValue("Content-Type"),
+                request.bodyToString());
+    }
 
-        String path = request.path().toLowerCase();
-        if (path.contains("graphql")) return true;
-
-        String contentType = request.headerValue("Content-Type");
-        if (contentType != null && contentType.contains("application/json")) {
-            String body = request.bodyToString();
-            return body != null && body.contains("\"query\"");
+    private String validateDispatch(String content) {
+        if (currentRequest == null) {
+            return "No HTTP request is loaded";
         }
 
-        return request.method().equalsIgnoreCase("GET") && path.contains("query=");
+        try {
+            URI endpoint = new URI(currentRequest.url());
+            String scheme = endpoint.getScheme();
+            if (scheme == null || endpoint.getHost() == null ||
+                    !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
+                return "The request endpoint must be a valid HTTP or HTTPS URL";
+            }
+        } catch (Exception e) {
+            return "The request endpoint is malformed: " + e.getMessage();
+        }
+
+        if (content == null || content.trim().isEmpty()) {
+            return "The GraphQL query cannot be empty";
+        }
+
+        if ("get".equals(currentAttackMode) ||
+                "urlencoded".equals(currentAttackMode) ||
+                "multipart".equals(currentAttackMode)) {
+            return null;
+        }
+
+        try {
+            JsonElement payload = JsonParser.parseString(content);
+            if (payload.isJsonObject()) {
+                return validateOperation(payload.getAsJsonObject(), "Request");
+            }
+            if (payload.isJsonArray()) {
+                JsonArray operations = payload.getAsJsonArray();
+                if (operations.size() == 0) {
+                    return "The GraphQL batch cannot be empty";
+                }
+                for (int i = 0; i < operations.size(); i++) {
+                    if (!operations.get(i).isJsonObject()) {
+                        return "Batch item " + (i + 1) + " must be a JSON object";
+                    }
+                    String error = validateOperation(operations.get(i).getAsJsonObject(),
+                            "Batch item " + (i + 1));
+                    if (error != null) return error;
+                }
+                return null;
+            }
+            return "The request body must be a JSON object or batch array";
+        } catch (Exception e) {
+            return "The request body is not valid JSON: " + e.getMessage();
+        }
+    }
+
+    private String validateOperation(JsonObject operation, String label) {
+        if (!operation.has("query") || operation.get("query").isJsonNull() ||
+                !operation.get("query").isJsonPrimitive() ||
+                !operation.getAsJsonPrimitive("query").isString() ||
+                operation.get("query").getAsString().trim().isEmpty()) {
+            return label + " must contain a non-empty query string";
+        }
+
+        if (operation.has("variables") && !operation.get("variables").isJsonNull() &&
+                !operation.get("variables").isJsonObject()) {
+            return label + " variables must be a valid JSON object";
+        }
+        return null;
+    }
+
+    private void showValidationError(String message) {
+        SwingUtilities.invokeLater(() -> statusLabel.setText("ERROR: " + message));
     }
 
     @Override
@@ -1677,6 +1590,12 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
         String content = queryArea.getText();
         if (content == null || content.isEmpty()) {
+            return currentRequest;
+        }
+
+        String validationError = validateDispatch(content);
+        if (validationError != null) {
+            showValidationError(validationError);
             return currentRequest;
         }
 
@@ -1732,6 +1651,8 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
                             .withBody(content);
             }
         } catch (Exception e) {
+            api.logging().logToError("[GraphQL Grip] Failed to build modified request: " + e.getMessage());
+            showValidationError("Could not build request: " + e.getMessage());
             return currentRequest;
         }
     }
@@ -1743,6 +1664,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
             originalQuery = null;
             originalRequestBody = null;
             queryArea.setText("No request loaded");
+            initialEditorContent = queryArea.getText();
             return;
         }
 
@@ -1772,13 +1694,14 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
             queryArea.setText(PRETTY_GSON.toJson(defaultBody));
             statusLabel.setText("No query found - using default");
         }
+        initialEditorContent = queryArea.getText();
     }
 
     @Override
     public boolean isEnabledFor(HttpRequestResponse requestResponse) {
         return requestResponse != null &&
                requestResponse.request() != null &&
-               isGraphQLRequest(requestResponse.request());
+               (repeaterContext || isGraphQLRequest(requestResponse.request()));
     }
 
     @Override
@@ -1798,7 +1721,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
     @Override
     public boolean isModified() {
-        if (originalRequestBody == null) return false;
-        return !originalRequestBody.equals(queryArea.getText());
+        if (initialEditorContent == null) return false;
+        return !initialEditorContent.equals(queryArea.getText());
     }
 }

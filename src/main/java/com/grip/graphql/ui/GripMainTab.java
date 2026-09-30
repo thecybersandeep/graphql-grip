@@ -5,9 +5,12 @@ import com.grip.graphql.model.schema.*;
 import com.grip.graphql.schema.IntrospectionHandler;
 import com.grip.graphql.schema.SchemaReconstructor;
 import com.grip.graphql.http.GripHttpClient;
+import com.grip.graphql.http.GraphQLResponseAnalyzer;
 import com.grip.graphql.security.GripEngineFingerprinter;
+import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.ui.editor.RawEditor;
 import com.google.gson.JsonObject;
 
 import javax.swing.*;
@@ -22,6 +25,7 @@ import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 
@@ -45,7 +49,7 @@ public class GripMainTab extends JPanel {
     private GripSchema currentSchema;
 
     private DefaultTableModel headersTableModel;
-    private Map<String, String> customHeaders = new HashMap<>();
+    private final Map<String, String> customHeaders = new ConcurrentHashMap<>();
 
     private JLabel statusBar;
     private javax.swing.Timer statusClearTimer;
@@ -258,7 +262,7 @@ public class GripMainTab extends JPanel {
             try {
                 logDoc.remove(0, logDoc.getLength());
             } catch (javax.swing.text.BadLocationException e) {
-
+                core.logError("Could not clear scanner log: " + e.getMessage());
             }
         });
     }
@@ -312,9 +316,16 @@ public class GripMainTab extends JPanel {
                     return;
                 }
 
-                boolean hasIntrospection = response.response().bodyToString().contains("__schema");
+                GraphQLResponseAnalyzer.Analysis analysis =
+                        GraphQLResponseAnalyzer.analyzeIntrospectionResponse(
+                                response.response().statusCode(),
+                                response.response().headerValue("Content-Type"),
+                                response.response().bodyToString());
 
-                if (hasIntrospection) {
+                if (!analysis.isGraphQL()) {
+                    appendLogStyled("[!] Not a GraphQL endpoint: " + analysis.getDetail(), "error");
+                    appendLog("[*] Verify the endpoint URL and any required authentication headers.");
+                } else if (analysis.isExpectedFieldAvailable()) {
                     appendLog("[+] Introspection ENABLED - fetching full schema...");
 
                     GripSchema schema = handler.fetchSchema(endpoint).join();
@@ -339,7 +350,10 @@ public class GripMainTab extends JPanel {
                         appendLog("[*] Schema loaded - check Schema tab to browse and craft requests");
                     }
                 } else {
-                    appendLog("[-] Introspection DISABLED");
+                    appendLog("[-] GraphQL endpoint confirmed, but introspection is unavailable");
+                    if (analysis.getDetail() != null && !analysis.getDetail().isBlank()) {
+                        appendLog("[*] Server response: " + analysis.getDetail());
+                    }
                     appendLog("[*] Try 'Blind Discovery' to reconstruct schema");
                 }
 
@@ -529,7 +543,10 @@ public class GripMainTab extends JPanel {
             }
             baseUrl += "/";
         } catch (Exception e) {
-
+            core.logError("Could not normalize endpoint discovery base URL: " + e.getMessage());
+            appendLogStyled("[!] Invalid base URL: " + e.getMessage(), "error");
+            showStatus("Endpoint discovery requires a valid HTTP or HTTPS base URL", true);
+            return;
         }
 
         final String finalBaseUrl = baseUrl;
@@ -546,6 +563,7 @@ public class GripMainTab extends JPanel {
             try {
             java.util.List<String> foundEndpoints = new java.util.ArrayList<>();
             int tested = 0;
+            int failedProbes = 0;
 
             for (String path : GRAPHQL_PATHS) {
                 tested++;
@@ -566,41 +584,27 @@ public class GripMainTab extends JPanel {
                     int status = response.response().statusCode();
                     String body = response.response().bodyToString();
 
-                    boolean isGraphQL = false;
-                    String evidence = "";
+                    String contentType = response.response().headerValue("Content-Type");
+                    GraphQLResponseAnalyzer.Analysis analysis =
+                            GraphQLResponseAnalyzer.analyzeEndpointProbe(status, contentType, body);
 
-                    if (body.contains("\"data\"") || body.contains("\"errors\"")) {
-                        isGraphQL = true;
-                        evidence = "GraphQL response structure";
-                    } else if (body.contains("__typename") || body.contains("__schema")) {
-                        isGraphQL = true;
-                        evidence = "Introspection response";
-                    } else if (body.contains("Must provide query string") ||
-                               body.contains("GraphQL") ||
-                               body.contains("query must be a string")) {
-                        isGraphQL = true;
-                        evidence = "GraphQL error message";
-                    } else if (status == 200 && body.contains("{") &&
-                               (body.contains("query") || body.contains("mutation"))) {
-                        isGraphQL = true;
-                        evidence = "Possible GraphQL (200 + JSON)";
-                    }
-
-                    if (isGraphQL) {
+                    if (analysis.isGraphQL()) {
                         foundEndpoints.add(testUrl);
-                        appendLog("[+] FOUND: " + testUrl + " (" + evidence + ")");
+                        appendLog("[+] FOUND: " + testUrl + " (" + analysis.getEvidence() + ")");
                     }
 
-                    if (status == 200 && (body.contains("GraphiQL") || body.contains("graphql-playground") ||
-                            body.contains("Apollo") || body.contains("Altair"))) {
+                    String ideEvidence = GraphQLResponseAnalyzer.graphQLIdeEvidence(
+                            status, contentType, body);
+                    if (ideEvidence != null) {
                         if (!foundEndpoints.contains(testUrl)) {
                             foundEndpoints.add(testUrl);
-                            appendLog("[+] FOUND UI: " + testUrl + " (GraphQL IDE detected)");
+                            appendLog("[+] FOUND UI: " + testUrl + " (" + ideEvidence + ")");
                         }
                     }
 
                 } catch (Exception e) {
-
+                    failedProbes++;
+                    core.logError("Endpoint discovery probe failed for " + testUrl + ": " + e.getMessage());
                 }
 
                 if (tested % 10 == 0) {
@@ -624,10 +628,18 @@ public class GripMainTab extends JPanel {
                 appendLogStyled("", "normal");
                 appendLog("[*] Click on an endpoint above and paste into Target field to scan");
             }
+            if (failedProbes > 0) {
+                appendLog("[!] " + failedProbes + " probe(s) failed - check connectivity, TLS, or authentication");
+            }
             appendLogStyled("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "header");
 
+            final int finalFailedProbes = failedProbes;
             SwingUtilities.invokeLater(() -> {
-                showStatus("Discovery complete: " + foundEndpoints.size() + " endpoint(s) found", false);
+                String summary = "Discovery complete: " + foundEndpoints.size() + " endpoint(s) found";
+                if (finalFailedProbes > 0) {
+                    summary += ", " + finalFailedProbes + " probe(s) failed";
+                }
+                showStatus(summary, false);
             });
             } catch (Exception e) {
                 core.logError("runEndpointDiscovery failed: " + e.getMessage());
@@ -678,7 +690,7 @@ public class GripMainTab extends JPanel {
                 logDoc.insertString(logDoc.getLength(), message + "\n", style);
                 logPane.setCaretPosition(logDoc.getLength());
             } catch (javax.swing.text.BadLocationException e) {
-
+                core.logError("Could not append styled scanner log entry: " + e.getMessage());
             }
         });
     }
@@ -707,7 +719,7 @@ public class GripMainTab extends JPanel {
                 logDoc.insertString(logDoc.getLength(), timestamp + message + "\n", style);
                 logPane.setCaretPosition(logDoc.getLength());
             } catch (javax.swing.text.BadLocationException e) {
-
+                core.logError("Could not append scanner log entry: " + e.getMessage());
             }
         });
     }
@@ -976,14 +988,15 @@ public class GripMainTab extends JPanel {
             }
         });
 
-        JTextArea queryArea = new JTextArea();
-        queryArea.setFont(theme.getCodeFont());
-        queryArea.setText("Select a Query or Mutation from the tree to generate a request.\n\n" +
+        RawEditor queryEditor = core.getApi().userInterface().createRawEditor();
+        queryEditor.setEditable(true);
+        queryEditor.setContents(ByteArray.byteArray(
+                "Select a Query or Mutation from the tree to generate a request.\n\n" +
                 "Right-click on any field to:\n" +
                 "  - Send to Repeater\n" +
                 "  - Execute Query\n" +
-                "  - Copy Query");
-        tabData.queryPreviewArea = queryArea;
+                "  - Copy Query"));
+        tabData.queryPreviewEditor = queryEditor;
 
         tree.addTreeSelectionListener(e -> {
             DefaultMutableTreeNode node = (DefaultMutableTreeNode) tree.getLastSelectedPathComponent();
@@ -992,12 +1005,10 @@ public class GripMainTab extends JPanel {
             if (userObj instanceof SchemaTreeNode stn) {
                 String query = stn.generateQuery();
                 if (query != null) {
-                    queryArea.setText(query);
-                    queryArea.setCaretPosition(0);
+                    queryEditor.setContents(ByteArray.byteArray(query));
                 }
             } else if (userObj instanceof TypeTreeNode ttn) {
-                queryArea.setText(ttn.getDescription());
-                queryArea.setCaretPosition(0);
+                queryEditor.setContents(ByteArray.byteArray(ttn.getDescription()));
             }
         });
 
@@ -1037,8 +1048,9 @@ public class GripMainTab extends JPanel {
         JScrollPane treeScroll = new JScrollPane(tree);
         treeScroll.setBorder(theme.createTitledBorder("Schema Browser - Click to craft request, Right-click to Send to Repeater"));
 
-        JScrollPane queryScroll = new JScrollPane(queryArea);
-        queryScroll.setBorder(theme.createTitledBorder("Generated GraphQL Query (editable)"));
+        JPanel queryEditorPanel = new JPanel(new BorderLayout());
+        queryEditorPanel.setBorder(theme.createTitledBorder("Generated GraphQL Query (editable)"));
+        queryEditorPanel.add(queryEditor.uiComponent(), BorderLayout.CENTER);
 
         JPanel queryButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
         JButton sendBtn = new JButton("Send to Repeater");
@@ -1057,7 +1069,7 @@ public class GripMainTab extends JPanel {
         queryButtons.add(copyBtn);
 
         JPanel queryPanel = new JPanel(new BorderLayout());
-        queryPanel.add(queryScroll, BorderLayout.CENTER);
+        queryPanel.add(queryEditorPanel, BorderLayout.CENTER);
         queryPanel.add(queryButtons, BorderLayout.SOUTH);
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, treeScroll, queryPanel);
@@ -1379,11 +1391,11 @@ public class GripMainTab extends JPanel {
     }
 
     private void sendSelectedQueryToRepeater() {
-        if (currentSchemaTab == null || currentSchemaTab.queryPreviewArea == null) {
+        if (currentSchemaTab == null || currentSchemaTab.queryPreviewEditor == null) {
             showStatus("No query selected", true);
             return;
         }
-        String query = currentSchemaTab.queryPreviewArea.getText().trim();
+        String query = currentSchemaTab.queryPreviewEditor.getContents().toString().trim();
         if (!isValidQuery(query)) {
             showStatus("No query selected - select a Query or Mutation first", true);
             return;
@@ -1422,11 +1434,11 @@ public class GripMainTab extends JPanel {
     }
 
     private void sendSelectedQueryToIntruder() {
-        if (currentSchemaTab == null || currentSchemaTab.queryPreviewArea == null) {
+        if (currentSchemaTab == null || currentSchemaTab.queryPreviewEditor == null) {
             showStatus("No query selected", true);
             return;
         }
-        String query = currentSchemaTab.queryPreviewArea.getText().trim();
+        String query = currentSchemaTab.queryPreviewEditor.getContents().toString().trim();
         if (!isValidQuery(query)) {
             showStatus("No query selected - select a Query or Mutation first", true);
             return;
@@ -1485,11 +1497,11 @@ public class GripMainTab extends JPanel {
     }
 
     private void executeSelectedQuery() {
-        if (currentSchemaTab == null || currentSchemaTab.queryPreviewArea == null) {
+        if (currentSchemaTab == null || currentSchemaTab.queryPreviewEditor == null) {
             showStatus("No query selected", true);
             return;
         }
-        String query = currentSchemaTab.queryPreviewArea.getText().trim();
+        String query = currentSchemaTab.queryPreviewEditor.getContents().toString().trim();
         if (!isValidQuery(query)) {
             showStatus("No query selected - select a Query or Mutation first", true);
             return;
@@ -1507,13 +1519,15 @@ public class GripMainTab extends JPanel {
 
                 SwingUtilities.invokeLater(() -> {
 
-                    JTextArea responseArea = new JTextArea(response.response().bodyToString());
-                    responseArea.setFont(theme.getCodeFont());
-                    responseArea.setEditable(false);
-                    JScrollPane scroll = new JScrollPane(responseArea);
-                    scroll.setPreferredSize(new Dimension(600, 400));
+                    RawEditor responseEditor = core.getApi().userInterface().createRawEditor();
+                    responseEditor.setEditable(false);
+                    responseEditor.setContents(ByteArray.byteArray(response.response().bodyToString()));
 
-                    JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), scroll, "Response", JOptionPane.INFORMATION_MESSAGE);
+                    JPanel responsePanel = new JPanel(new BorderLayout());
+                    responsePanel.add(responseEditor.uiComponent(), BorderLayout.CENTER);
+                    responsePanel.setPreferredSize(new Dimension(600, 400));
+
+                    JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), responsePanel, "Response", JOptionPane.INFORMATION_MESSAGE);
                 });
             } catch (Exception e) {
                 core.logError("executeSelectedQuery failed: " + e.getMessage());
@@ -1525,11 +1539,11 @@ public class GripMainTab extends JPanel {
     }
 
     private void copySelectedQuery() {
-        if (currentSchemaTab == null || currentSchemaTab.queryPreviewArea == null) {
+        if (currentSchemaTab == null || currentSchemaTab.queryPreviewEditor == null) {
             showStatus("No query selected", true);
             return;
         }
-        String query = currentSchemaTab.queryPreviewArea.getText().trim();
+        String query = currentSchemaTab.queryPreviewEditor.getContents().toString().trim();
         if (query.isEmpty() || query.startsWith("Select a Query") || query.startsWith("#")) {
             showStatus("No query to copy", true);
             return;
@@ -1718,7 +1732,9 @@ public class GripMainTab extends JPanel {
                 if (host != null) {
                     suggestedName = host.replace(".", "_") + "_schema.graphql";
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                core.logError("Could not derive export filename from schema endpoint: " + e.getMessage());
+            }
         }
         fileChooser.setSelectedFile(new java.io.File(suggestedName));
 
@@ -1814,7 +1830,8 @@ public class GripMainTab extends JPanel {
         try {
             java.net.URI uri = new java.net.URI(url);
             String scheme = uri.getScheme();
-            return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+            return uri.getHost() != null && !uri.getHost().isBlank() &&
+                    ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
         } catch (java.net.URISyntaxException e) {
             return false;
         }
@@ -2102,7 +2119,7 @@ public class GripMainTab extends JPanel {
         JTree tree;
         DefaultMutableTreeNode rootNode;
         DefaultTreeModel treeModel;
-        JTextArea queryPreviewArea;
+        RawEditor queryPreviewEditor;
 
         SchemaGraphPanel graphPanel;
 

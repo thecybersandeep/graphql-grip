@@ -29,6 +29,13 @@ public class GripConfig {
     public static final String SECURITY_DOS_FIELD_COUNT = "security.dos.field_count";
     public static final String SECURITY_DOS_DIRECTIVE_COUNT = "security.dos.directive_count";
 
+    public static final String ATTACK_ALIAS_COUNT = "grip.attack.aliases";
+    public static final String ATTACK_BATCH_COUNT = "grip.attack.batch";
+    public static final String ATTACK_FIELD_COUNT = "grip.attack.fields";
+    public static final String ATTACK_DIRECTIVE_COUNT = "grip.attack.directives";
+    public static final String ATTACK_DEPTH_COUNT = "grip.attack.depth";
+    public static final String ATTACK_FRAGMENT_COUNT = "grip.attack.fragments";
+
     public static final String POI_ENABLED = "poi.enabled";
     public static final String POI_DEPTH = "poi.depth";
     public static final String POI_AUTH = "poi.auth";
@@ -81,6 +88,13 @@ public class GripConfig {
         defaults.put(SECURITY_DOS_BATCH_COUNT, 10);
         defaults.put(SECURITY_DOS_FIELD_COUNT, 500);
         defaults.put(SECURITY_DOS_DIRECTIVE_COUNT, 10);
+
+        defaults.put(ATTACK_ALIAS_COUNT, 100);
+        defaults.put(ATTACK_BATCH_COUNT, 10);
+        defaults.put(ATTACK_FIELD_COUNT, 500);
+        defaults.put(ATTACK_DIRECTIVE_COUNT, 50);
+        defaults.put(ATTACK_DEPTH_COUNT, 10);
+        defaults.put(ATTACK_FRAGMENT_COUNT, 50);
 
         defaults.put(POI_ENABLED, true);
         defaults.put(POI_DEPTH, 4);

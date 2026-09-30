@@ -4,6 +4,8 @@ import com.grip.graphql.GripCore;
 import com.grip.graphql.model.schema.*;
 import com.google.gson.JsonObject;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.ui.editor.RawEditor;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
@@ -752,13 +754,15 @@ public class SchemaGraphPanel extends JPanel {
             }
         }
 
-        JTextArea textArea = new JTextArea(sb.toString());
-        textArea.setFont(theme.getCodeFont());
-        textArea.setEditable(false);
-        JScrollPane scroll = new JScrollPane(textArea);
-        scroll.setPreferredSize(new Dimension(550, 400));
+        RawEditor typeEditor = core.getApi().userInterface().createRawEditor();
+        typeEditor.setEditable(false);
+        typeEditor.setContents(ByteArray.byteArray(sb.toString()));
 
-        JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), scroll, "Type: " + node.name, JOptionPane.INFORMATION_MESSAGE);
+        JPanel typePanel = new JPanel(new BorderLayout());
+        typePanel.add(typeEditor.uiComponent(), BorderLayout.CENTER);
+        typePanel.setPreferredSize(new Dimension(550, 400));
+
+        JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), typePanel, "Type: " + node.name, JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void sendTypeToRepeater(GraphNode node) {

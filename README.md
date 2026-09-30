@@ -3,9 +3,9 @@
 [![Java](https://img.shields.io/badge/Java-17%2B-ED8B00?style=flat&logo=openjdk&logoColor=white)](https://openjdk.org/)
 [![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Montoya%20API-FF6633?style=flat)](https://portswigger.net/burp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0.1-green.svg)](../../releases)
+[![Version](https://img.shields.io/badge/Version-2.0.0-green.svg)](../../releases)
 
-Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, generate attack payloads : all from within Burp.
+Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, and generate attack payloads from within Burp.
 
 **Main tab:** `Schema Analysis & Testing`
 
@@ -17,23 +17,23 @@ Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint ba
 
 ## What It Does
 
-**Schema Analysis** : runs introspection to pull the full schema. Falls back to blind reconstruction if introspection is off. Also fingerprints the backend (Apollo, Hasura, Yoga, graphql-java, etc.).
+**Schema Analysis:** runs introspection to pull the full schema. Falls back to blind reconstruction if introspection is off. Also fingerprints the backend (Apollo, Hasura, Yoga, graphql-java, etc.).
 
-**Attack Generation** : lives in the Repeater tab. Pick an attack type, tweak params, hit send. Covers DoS (alias overloading, field duplication, circular queries), mutation abuse, directive probing, and introspection bypass techniques.
+**Attack Generation:** lives in the Repeater tab. Pick an attack type, adjust its settings, generate the payload, and send it. Covers DoS (alias overloading, field duplication, circular queries), mutation abuse, directive probing, and introspection bypass techniques.
 
-**Endpoint Discovery** : finds GraphQL endpoints and detects exposed GraphiQL/Playground interfaces.
+**Endpoint Discovery:** finds GraphQL endpoints and detects exposed GraphiQL, Playground, and Altair interfaces.
 
 ## Installation
 
-Grab `graphql-grip-1.0.1.jar` from [Releases](../../releases), or build from source. Go to Extensions > Add in Burp, select the JAR.
+Grab `graphql-grip-2.0.0.jar` from [Releases](../../releases), or build from source. Go to Extensions > Add in Burp, select the JAR.
 
-Requires Burp Suite 2023.12+ and Java 17+.
+Requires Burp Suite 2026.7+ and Java 17+.
 
 ## Quick Start
 
 **Main tab:** drop your target URL, hit Scan & Introspect, browse the schema. Use Fingerprint Engine to identify what's running underneath.
 
-**Repeater:** send any GraphQL request to Repeater > switch to GraphQL Grip tab > pick attack type > adjust params > generate > send.
+**Repeater:** send a request to Repeater, switch to the GraphQL Grip tab, choose an attack type, adjust its settings, generate the payload, and send it. The tab is always available in Repeater, including for requests that do not yet contain a GraphQL operation.
 
 ## Large Schema Support
 
@@ -51,7 +51,7 @@ Tested against production APIs with 18,000+ types. The schema tree loads lazily 
 
 ## Configuration
 
-Settings persist through Burp's preferences:
+Attack payload settings are available under **Settings > GraphQL Grip** and persist through Burp's preferences:
 
 | Setting | Default | What it controls |
 |---------|---------|------------------|
@@ -83,7 +83,7 @@ chmod +x ./gradlew
 
 Windows: `gradlew.bat jar`
 
-Output: `build/libs/graphql-grip-1.0.1.jar`
+Output: `build/libs/graphql-grip-2.0.0.jar`
 
 ## Project Structure
 
@@ -103,6 +103,18 @@ src/main/java/com/grip/graphql/
 ```
 
 ## Changelog
+
+### v2.0.0
+
+Updated to Montoya API 2026.7. Attack configuration now lives under **Settings > GraphQL Grip**, and the GraphQL Grip editor is always available in Repeater.
+
+Schema queries, test responses, and type details now use Burp's native raw editor. Request validation reports invalid endpoints, empty queries, and malformed variables before a request is built.
+
+Endpoint discovery now parses response data instead of matching arbitrary text. HTML error pages, generic JSON responses, and REST error envelopes are no longer reported as GraphQL endpoints. Probe failures are counted and written to Burp's error output.
+
+Fixed GET, URL encoded, multipart, batch, raw GraphQL, and persisted query handling. Custom headers are safe to use across the UI and scanner threads. Removed unused runtime dependencies and stopped bundling the Montoya API in the extension JAR.
+
+Full release history is available in [CHANGELOG.md](CHANGELOG.md).
 
 ### v1.0.1
 

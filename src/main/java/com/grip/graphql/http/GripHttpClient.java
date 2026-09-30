@@ -5,8 +5,8 @@ import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
-import com.google.gson.JsonSyntaxException;
 import com.grip.graphql.GripConfig;
 
 import java.util.HashMap;
@@ -210,12 +210,7 @@ public class GripHttpClient {
                     throw new GripHttpException("Server error: HTTP " + statusCode, endpoint, responseBody);
                 }
 
-                return JsonParser.parseString(responseBody).getAsJsonObject();
-
-            } catch (JsonSyntaxException e) {
-                lastException = new GripHttpException("Invalid JSON response from server", endpoint, e.getMessage());
-                logError("JSON parse error for " + endpoint + ": " + e.getMessage());
-                break;
+                return parseJsonObjectResponse(response, endpoint);
             } catch (GripAuthException e) {
                 logError("Auth error for " + endpoint + ": " + e.getMessage());
                 throw e;
@@ -363,8 +358,38 @@ public class GripHttpClient {
         if (response == null || response.response() == null) {
             throw new GripHttpException("No response received from server", endpoint, null);
         }
+        return parseJsonObjectResponse(response, endpoint);
+    }
+
+    private JsonObject parseJsonObjectResponse(HttpRequestResponse response, String endpoint)
+            throws GripHttpException {
+        int statusCode = response.response().statusCode();
         String responseBody = response.response().bodyToString();
-        return JsonParser.parseString(responseBody).getAsJsonObject();
+        String contentType = response.response().headerValue("Content-Type");
+
+        if (GraphQLResponseAnalyzer.isHtmlResponse(contentType, responseBody)) {
+            throw new GripHttpException(
+                    "Not a GraphQL JSON response: HTTP " + statusCode + " returned " +
+                            GraphQLResponseAnalyzer.displayContentType(contentType),
+                    endpoint, responseBody);
+        }
+
+        try {
+            JsonElement parsed = JsonParser.parseString(responseBody);
+            if (!parsed.isJsonObject()) {
+                throw new GripHttpException(
+                        "Invalid GraphQL response: HTTP " + statusCode + " returned a non-object JSON value",
+                        endpoint, responseBody);
+            }
+            return parsed.getAsJsonObject();
+        } catch (GripHttpException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new GripHttpException(
+                    "Invalid GraphQL response: HTTP " + statusCode + " returned non-JSON content (" +
+                            GraphQLResponseAnalyzer.displayContentType(contentType) + ")",
+                    endpoint, responseBody);
+        }
     }
 
     public HttpRequestResponse sendQueryWithLog(String endpoint, String query, String source) throws Exception {
@@ -478,6 +503,13 @@ public class GripHttpClient {
 
     private void logError(String message) {
         api.logging().logToError("[GraphQL Grip] " + message);
+    }
+
+    public void logError(String context, Throwable error) {
+        String detail = error != null && error.getMessage() != null
+                ? error.getMessage()
+                : error != null ? error.getClass().getSimpleName() : "Unknown error";
+        api.logging().logToError("[GraphQL Grip] " + context + ": " + detail);
     }
 
     public static class GripHttpException extends Exception {

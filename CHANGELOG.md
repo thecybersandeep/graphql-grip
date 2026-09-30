@@ -32,6 +32,8 @@ GET, URL encoded, and multipart payload generation now preserves the GraphQL que
 
 The extension version is now reported as `2.0.0`. The Montoya API is a compile time dependency and is no longer bundled in the extension JAR. Unused runtime dependencies and unused imports were removed.
 
+The `2.0.0` release JAR is 465 KB, compared with 5.41 MB for `1.0.1`. The smaller package is expected because Burp supplies the Montoya API and GraphQL Grip no longer depends on GraphQL Java or RSyntaxTextArea. On the GitHub release page, `48` is the download count for `1.0.1`, not part of its file size.
+
 Automated tests cover GraphQL response classification and Repeater request detection, including HTML false positives and generic REST responses.
 
 ## 1.0.1

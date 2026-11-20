@@ -1,14 +1,15 @@
 package com.grip.graphql.editor;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.core.ToolType;
+import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.ui.Selection;
+import burp.api.montoya.ui.editor.RawEditor;
 import burp.api.montoya.ui.editor.extension.EditorCreationContext;
 import burp.api.montoya.ui.editor.extension.ExtensionProvidedHttpRequestEditor;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -19,11 +20,8 @@ import com.grip.graphql.ui.GripTheme;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.net.URI;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
@@ -33,18 +31,16 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     private final boolean repeaterContext;
 
     private JPanel mainPanel;
-    private JTextArea queryArea;
+    private RawEditor queryEditor;
     private JLabel statusLabel;
     private HttpRequest currentRequest;
     private String originalQuery;
     private String originalRequestBody;
     private String initialEditorContent;
-    private String currentAttackMode = "query";
+    private PayloadTransport currentTransport = PayloadTransport.JSON;
+    private PayloadTransport capturedTransport = PayloadTransport.JSON;
 
-    private String extractedFieldName = "__typename";
-    private String extractedFieldCall = null;
-    private String extractedOperationType = "query";
-    private String extractedMutationName = null;
+    private GraphQLOperationSource source = GraphQLOperationSource.empty();
 
     private int aliasCount = 100;
     private int batchCount = 10;
@@ -52,11 +48,6 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     private int directiveCount = 50;
     private int depthCount = 10;
     private int fragmentCount = 50;
-
-    private static final Gson PRETTY_GSON = new GsonBuilder()
-            .setPrettyPrinting()
-            .disableHtmlEscaping()
-            .create();
 
     public GripRequestEditor(MontoyaApi api, GripCore core, EditorCreationContext context) {
         this.api = api;
@@ -107,9 +98,22 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         JPanel titleRow = new JPanel(new BorderLayout());
         titleRow.add(titleLabel, BorderLayout.WEST);
 
+        JLabel sizesLabel = new JLabel("Payload sizes (change in Settings)");
+        sizesLabel.setFont(theme.getNormalFont());
+        sizesLabel.setForeground(theme.getSecondaryText());
+        sizesLabel.setToolTipText(
+                "Change these in Burp Settings, under GraphQL Grip. Applies to new payloads.");
+
+        JPanel statusRows = new JPanel();
+        statusRows.setLayout(new BoxLayout(statusRows, BoxLayout.Y_AXIS));
+        statusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        sizesLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        statusRows.add(statusLabel);
+        statusRows.add(sizesLabel);
+
         headerPanel.add(titleRow, BorderLayout.NORTH);
         headerPanel.add(new JSeparator(), BorderLayout.CENTER);
-        headerPanel.add(statusLabel, BorderLayout.SOUTH);
+        headerPanel.add(statusRows, BorderLayout.SOUTH);
 
         JTabbedPane attackTabs = new JTabbedPane();
         attackTabs.setFont(theme.getNormalFont());
@@ -120,38 +124,36 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         attackTabs.addTab("Directives", createDirectivesPanel());
         attackTabs.addTab("Info Disclosure", createInfoPanel());
 
-        queryArea = new JTextArea();
-        queryArea.setFont(theme.getCodeFont());
-        queryArea.setLineWrap(true);
-        queryArea.setWrapStyleWord(true);
-        queryArea.setRows(10);
+        queryEditor = api.userInterface().createRawEditor();
+        queryEditor.setEditable(true);
 
-        JScrollPane queryScroll = new JScrollPane(queryArea);
-        queryScroll.setBorder(BorderFactory.createTitledBorder("Modified Request Body (editable)"));
-        queryScroll.setMinimumSize(new Dimension(100, 150));
-        queryScroll.setPreferredSize(new Dimension(400, 200));
+        JPanel queryPanel = new JPanel(new BorderLayout());
+        queryPanel.setBorder(BorderFactory.createTitledBorder("Modified Request Body (editable)"));
+        queryPanel.add(queryEditor.uiComponent(), BorderLayout.CENTER);
+        queryPanel.setMinimumSize(new Dimension(100, 150));
+        queryPanel.setPreferredSize(new Dimension(400, 200));
 
         JPanel utilPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
 
         JButton copyBtn = new JButton("Copy to Clipboard");
         copyBtn.addActionListener(e -> {
-            queryArea.selectAll();
-            queryArea.copy();
-            statusLabel.setText("Copied to clipboard!");
+            String payload = payloadText();
+            if (payload == null || payload.isBlank()) {
+                statusLabel.setText("Nothing to copy");
+                return;
+            }
+            Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .setContents(new StringSelection(payload), null);
+            statusLabel.setText("Copied " + payload.length() + " characters to the clipboard");
         });
 
         JButton resetBtn = new JButton("Reset to Original");
         resetBtn.addActionListener(e -> {
-            if (originalRequestBody != null) {
-                try {
-                    JsonObject parsed = JsonParser.parseString(originalRequestBody).getAsJsonObject();
-                    queryArea.setText(PRETTY_GSON.toJson(parsed));
-                } catch (Exception ex) {
-                    queryArea.setText(originalRequestBody);
-                }
-                currentAttackMode = "query";
-                statusLabel.setText("Reset to original request");
+            if (currentRequest == null) {
+                return;
             }
+                currentTransport = capturedTransport;
+            renderCapturedRequest();
         });
 
         utilPanel.add(copyBtn);
@@ -162,7 +164,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         topPanel.add(attackTabs, BorderLayout.CENTER);
         topPanel.setMinimumSize(new Dimension(100, 200));
 
-        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topPanel, queryScroll);
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topPanel, queryPanel);
         splitPane.setResizeWeight(0.35);
         splitPane.setDividerLocation(300);
         splitPane.setOneTouchExpandable(true);
@@ -196,7 +198,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         fieldSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JPanel fieldButtons = new JPanel(new GridLayout(1, 1, 5, 5));
-        addAttackButton(fieldButtons, "Field Duplication", "N aliased fields (each = separate resolution)", e -> applyFieldDuplication());
+        addAttackButton(fieldButtons, "Field Duplication", "N unaliased copies of one field, to test field merging", e -> applyFieldDuplication());
 
         fieldSection.add(fieldButtons, BorderLayout.CENTER);
         fieldSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
@@ -296,7 +298,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         fragSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JPanel fragButtons = new JPanel(new GridLayout(1, 1, 5, 5));
-        addAttackButton(fragButtons, "Mutation Fragments", "fragment MF0..MFn on Mutation { __typename }", e -> applyMutationFragments());
+        addAttackButton(fragButtons, "Mutation Fragments", "N inline fragments, each wrapping your mutation", e -> applyMutationFragments());
 
         fragSection.add(fragButtons, BorderLayout.CENTER);
         fragSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
@@ -304,8 +306,12 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
         mainPanel.add(Box.createVerticalGlue());
 
+        JScrollPane scrollPane = new JScrollPane(mainPanel);
+        scrollPane.setBorder(null);
+        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+
         JPanel panel = new JPanel(new BorderLayout());
-        panel.add(mainPanel, BorderLayout.NORTH);
+        panel.add(scrollPane, BorderLayout.CENTER);
 
         return panel;
     }
@@ -454,7 +460,8 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         csrfSection.setBorder(BorderFactory.createTitledBorder("Request Format / CSRF"));
         csrfSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JPanel csrfButtons = new JPanel(new GridLayout(1, 4, 5, 5));
+        JPanel csrfButtons = new JPanel(new GridLayout(1, 5, 5, 5));
+        addAttackButton(csrfButtons, "POST JSON", "Default transport", e -> convertToJson());
         addAttackButton(csrfButtons, "GET Method", "Query as URL param", e -> convertToGet());
         addAttackButton(csrfButtons, "URL-Encoded", "x-www-form-urlencoded", e -> convertToUrlEncoded());
         addAttackButton(csrfButtons, "Multipart", "multipart/form-data", e -> convertToMultipart());
@@ -618,10 +625,10 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
     private void addAttackButton(JPanel panel, String name, String description, java.awt.event.ActionListener action) {
         JButton btn = new JButton(name);
-        btn.setFont(theme.getNormalFont());
+        btn.setFont(theme.getFont(Font.PLAIN, GripTheme.FONT_SIZE_NORMAL - 1));
         btn.setFocusPainted(false);
         btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        btn.setToolTipText("<html><div style='padding:4px;'><b>" + name + "</b><br>" + description + "</div></html>");
+        btn.setToolTipText(description);
         btn.setBorder(BorderFactory.createCompoundBorder(
             new GripTheme.RoundedBorder(theme.getBorder(), GripTheme.CORNER_RADIUS_SM, 1),
             BorderFactory.createEmptyBorder(GripTheme.SPACING_SM, GripTheme.SPACING_MD, GripTheme.SPACING_SM, GripTheme.SPACING_MD)
@@ -633,648 +640,236 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         panel.add(btn);
     }
 
-    private void extractFieldFromQuery(String query) {
-        if (query == null || query.isEmpty()) {
-            extractedFieldName = "__typename";
-            extractedFieldCall = null;
-            extractedMutationName = null;
-            return;
-        }
-
-        Pattern opTypePattern = Pattern.compile("^\\s*(query|mutation|subscription)", Pattern.CASE_INSENSITIVE);
-        Matcher opMatcher = opTypePattern.matcher(query);
-        if (opMatcher.find()) {
-            extractedOperationType = opMatcher.group(1).toLowerCase();
-        } else {
-            extractedOperationType = "query";
-        }
-
-        Pattern fieldPattern = Pattern.compile(
-            "(?:query|mutation|subscription)\\s*(?:\\w+)?\\s*(?:\\([^)]*\\))?\\s*\\{\\s*(\\w+)",
-            Pattern.CASE_INSENSITIVE
-        );
-        Matcher matcher = fieldPattern.matcher(query);
-        if (matcher.find()) {
-            extractedFieldName = matcher.group(1);
-            if (extractedOperationType.equals("mutation")) {
-                extractedMutationName = extractedFieldName;
-            }
-        } else {
-            Pattern simplePattern = Pattern.compile("\\{\\s*(\\w+)");
-            Matcher simpleMatcher = simplePattern.matcher(query);
-            if (simpleMatcher.find()) {
-                extractedFieldName = simpleMatcher.group(1);
-            }
-        }
-
-        extractedFieldCall = extractFullFieldCall(query);
+    private String payloadText() {
+        return queryEditor == null ? "" : queryEditor.getContents().toString();
     }
 
-    private String extractFullFieldCall(String query) {
-        if (query == null) return null;
+    private void setPayloadText(String payload) {
+        queryEditor.setContents(ByteArray.byteArray(payload == null ? "" : payload));
+    }
 
-        int firstBrace = query.indexOf('{');
-        if (firstBrace == -1) return null;
-
-        int depth = 0;
-        int start = -1;
-        int end = -1;
-
-        for (int i = firstBrace; i < query.length(); i++) {
-            char c = query.charAt(i);
-            if (c == '{') {
-                depth++;
-                if (depth == 1) {
-                    start = i + 1;
-                }
-            } else if (c == '}') {
-                depth--;
-                if (depth == 0) {
-                    end = i;
-                    break;
-                }
-            }
-        }
-
-        if (start != -1 && end != -1 && end > start) {
-            return query.substring(start, end).trim();
-        }
-        return null;
+    private void emit(String query, String status) {
+        JsonObject body = new JsonObject();
+        body.addProperty("query", query);
+        setQueryOutput(body, status);
     }
 
     private void setQueryOutput(JsonObject body, String status) {
-        queryArea.setText(PRETTY_GSON.toJson(body));
-        statusLabel.setText(status);
+        JsonObject output = body;
+
+        if (body.has("query") && body.get("query").isJsonPrimitive()) {
+            output = GraphQLPayloadWriter.body(source, body.get("query").getAsString());
+            for (String member : body.keySet()) {
+                if (!"query".equals(member)) {
+                    output.add(member, body.get(member));
+                }
+            }
+        }
+
+        setPayloadText(GraphQLPayloadWriter.json(output));
+        statusLabel.setText(status + "  |  " + currentTransport.description());
     }
 
     private void applyAliasOverloading() {
-        currentAttackMode = "query";
-        String fieldToUse = extractedFieldCall != null ? extractedFieldCall : extractedFieldName;
-
-        StringBuilder sb = new StringBuilder();
-        sb.append(extractedOperationType).append(" GripAliasOverload {\n");
-        for (int i = 0; i < aliasCount; i++) {
-            sb.append(String.format("  a%d: %s\n", i, fieldToUse));
-        }
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Alias Overloading: " + aliasCount + " aliases");
+        emit(GraphQLPayloads.aliasOverloading(source, aliasCount),
+                "Alias Overloading: " + aliasCount + " aliases");
     }
 
     private void applyBatchQuery() {
-        currentAttackMode = "batch";
 
         if (originalQuery == null) {
             statusLabel.setText("No query loaded - load a request first");
             return;
         }
 
-        JsonArray batch = new JsonArray();
-        for (int i = 0; i < batchCount; i++) {
-            JsonObject item = new JsonObject();
-            item.addProperty("query", originalQuery);
-            batch.add(item);
-        }
+        JsonArray batch = GraphQLPayloadWriter.repeated(source, originalQuery, batchCount);
 
-        queryArea.setText(PRETTY_GSON.toJson(batch));
+        setPayloadText(GraphQLPayloadWriter.json(batch));
         statusLabel.setText("Batch Query: " + batchCount + " copies of original query");
     }
 
     private void applyMixedBatch() {
-        currentAttackMode = "batch";
+        String query = originalQuery != null ? originalQuery : GraphQLPayloads.TYPENAME_PROBE;
 
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-        String introQuery = "query { __schema { queryType { name } } }";
-
-        JsonArray batch = new JsonArray();
-
-        for (int i = 0; i < batchCount; i++) {
-            JsonObject item = new JsonObject();
-
-            item.addProperty("query", i % 2 == 0 ? query : introQuery);
-            batch.add(item);
-        }
-
-        queryArea.setText(PRETTY_GSON.toJson(batch));
-        statusLabel.setText("Mixed Batch: " + batchCount + " alternating queries + introspection");
+        setPayloadText(GraphQLPayloadWriter.json(GraphQLPayloadWriter.alternating(
+                source, query, GraphQLPayloads.INTROSPECTION_PING, batchCount)));
+        statusLabel.setText("Mixed Batch: " + batchCount
+                + " alternating queries + introspection");
     }
 
     private void applyIncrementalBatch() {
-        currentAttackMode = "batch";
+        String query = originalQuery != null ? originalQuery : GraphQLPayloads.TYPENAME_PROBE;
 
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-
-        JsonArray batch = new JsonArray();
-        for (int i = 0; i < batchCount; i++) {
-            JsonObject item = new JsonObject();
-            item.addProperty("query", query);
-            item.addProperty("operationName", "Op" + i);
-            batch.add(item);
-        }
-
-        queryArea.setText(PRETTY_GSON.toJson(batch));
-        statusLabel.setText("Incremental Batch: " + batchCount + " queries - adjust Batch spinner and retry to find server limit");
+        setPayloadText(GraphQLPayloadWriter.json(
+                GraphQLPayloadWriter.renamedSeries(source, "Op", query, batchCount)));
+        statusLabel.setText("Incremental Batch: " + batchCount
+                + " queries - raise Operations per batch in Settings and retry"
+                + " to find the server limit");
     }
 
     private void applyBatchWithVariables() {
-        currentAttackMode = "batch";
+        String query = originalQuery != null ? originalQuery : GraphQLPayloads.TYPENAME_PROBE;
 
-        String baseQuery = originalQuery != null ? originalQuery : "query { __typename }";
-
-        JsonArray batch = new JsonArray();
-        for (int i = 0; i < batchCount; i++) {
-            JsonObject item = new JsonObject();
-            item.addProperty("query", baseQuery);
-            item.addProperty("operationName", "GripBatch" + i);
-            batch.add(item);
-        }
-
-        queryArea.setText(PRETTY_GSON.toJson(batch));
-        statusLabel.setText("Batch with Variables: " + batchCount + " queries - each has unique operationName (bypasses some rate limits)");
+        setPayloadText(GraphQLPayloadWriter.json(
+                GraphQLPayloadWriter.renamedSeries(source, "GripBatch", query, batchCount)));
+        statusLabel.setText("Batch with Variables: " + batchCount
+                + " queries - each has a unique operationName (bypasses some rate limits)");
     }
 
     private void applyFieldDuplication() {
-        currentAttackMode = "query";
-
-        String fieldToUse = extractedFieldName != null ? extractedFieldName : "__typename";
-
-        StringBuilder sb = new StringBuilder();
-        sb.append(extractedOperationType).append(" GripFieldDuplication {\n");
-        for (int i = 0; i < fieldDupCount; i++) {
-            sb.append("  f").append(i).append(": ").append(fieldToUse).append("\n");
-        }
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Field Duplication: " + fieldDupCount + " aliased fields (each alias = separate resolution)");
+        emit(GraphQLPayloads.fieldDuplication(source, fieldDupCount),
+                "Field Duplication: " + fieldDupCount + " unaliased copies of one field"
+                        + " - a conformant server merges them into a single resolution");
     }
 
     private void applyWidthAttack() {
-        currentAttackMode = "query";
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("query GripWidthAttack {\n");
-
-        String[] commonTypes = {"Query", "Mutation", "Subscription", "User", "Admin", "String", "Int", "Boolean", "ID", "Float"};
-        for (int i = 0; i < Math.min(aliasCount, commonTypes.length); i++) {
-            sb.append("  t").append(i).append(": __type(name: \"").append(commonTypes[i % commonTypes.length]).append("\") { name kind fields { name type { name } } }\n");
-        }
-
-        for (int i = commonTypes.length; i < aliasCount; i++) {
-            sb.append("  t").append(i).append(": __type(name: \"Type").append(i).append("\") { name kind }\n");
-        }
-
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Width Attack: " + aliasCount + " DIFFERENT __type queries (breadth test, not repetition)");
+        emit(GraphQLPayloads.widthAttack(aliasCount),
+                "Width Attack: " + aliasCount
+                        + " __type lookups with distinct arguments (breadth, not repetition)");
     }
 
     private void applyFragmentOverloading() {
-        currentAttackMode = "query";
-        StringBuilder sb = new StringBuilder();
-
-        for (int i = 0; i < fragmentCount; i++) {
-            sb.append("fragment f").append(i).append(" on __Schema { queryType { name } }\n");
-        }
-
-        sb.append("\nquery GripFragmentOverload {\n  __schema {\n");
-        for (int i = 0; i < fragmentCount; i++) {
-            sb.append("    ...f").append(i).append("\n");
-        }
-        sb.append("  }\n}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Fragment Overloading: " + fragmentCount + " fragments");
+        emit(GraphQLPayloads.fragmentOverloading(fragmentCount),
+                "Fragment Overloading: " + fragmentCount + " fragments");
     }
 
     private void applyDeepRecursion() {
-        currentAttackMode = "query";
-        StringBuilder sb = new StringBuilder();
-        sb.append("query GripDeepRecursion {\n");
-        sb.append("  __schema {\n");
-        sb.append("    queryType {\n");
-        sb.append("      name\n");
-
-        String indent = "      ";
-        for (int i = 0; i < depthCount; i++) {
-            sb.append(indent).append("fields {\n");
-            sb.append(indent).append("  name\n");
-            sb.append(indent).append("  type {\n");
-            sb.append(indent).append("    name\n");
-            indent += "    ";
-        }
-
-        for (int i = 0; i < depthCount; i++) {
-            indent = indent.substring(0, indent.length() - 4);
-            sb.append(indent).append("  }\n");
-            sb.append(indent).append("}\n");
-        }
-
-        sb.append("    }\n");
-        sb.append("  }\n");
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Deep Recursion: depth " + depthCount);
+        emit(GraphQLPayloads.deepRecursion(depthCount), "Deep Recursion: depth " + depthCount);
     }
 
     private void applyCircularIntrospection() {
-        currentAttackMode = "query";
-        StringBuilder sb = new StringBuilder();
-        sb.append("query GripCircularIntrospection {\n");
-        sb.append("  __schema {\n");
-        sb.append("    types {\n");
-        sb.append("      name\n");
-        sb.append("      kind\n");
-
-        String indent = "      ";
-        for (int i = 0; i < depthCount; i++) {
-            sb.append(indent).append("fields {\n");
-            sb.append(indent).append("  name\n");
-            sb.append(indent).append("  type {\n");
-            sb.append(indent).append("    name\n");
-            sb.append(indent).append("    kind\n");
-            sb.append(indent).append("    ofType {\n");
-            sb.append(indent).append("      name\n");
-            indent += "      ";
-        }
-
-        for (int i = 0; i < depthCount; i++) {
-            indent = indent.substring(0, indent.length() - 6);
-            sb.append(indent).append("    }\n");
-            sb.append(indent).append("  }\n");
-            sb.append(indent).append("}\n");
-        }
-
-        sb.append("    }\n");
-        sb.append("  }\n");
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Circular Introspection: depth " + depthCount);
+        emit(GraphQLPayloads.circularIntrospection(depthCount),
+                "Circular Introspection: depth " + depthCount);
     }
 
     private void applyAliasedMutations() {
-        currentAttackMode = "query";
-
-        String fieldCall;
-        if (extractedOperationType.equals("mutation") && extractedFieldCall != null) {
-
-            fieldCall = extractedFieldCall;
-        } else if (extractedMutationName != null) {
-
-            fieldCall = extractedMutationName + " { __typename }";
-        } else {
-
-            fieldCall = "__typename  # REPLACE with actual mutation like: createUser(input: {}) { id }";
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("mutation GripAliasedMutations {\n");
-        for (int i = 0; i < aliasCount; i++) {
-            sb.append("  m").append(i).append(": ").append(fieldCall).append("\n");
-        }
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-
-        String status = extractedOperationType.equals("mutation")
-            ? "Aliased Mutations: " + aliasCount + " copies of your mutation (⚠ Review!)"
-            : "Aliased Mutations: " + aliasCount + " (⚠ PLACEHOLDER - replace with real mutation!)";
-        setQueryOutput(body, status);
+        emit(GraphQLPayloads.aliasedMutations(source, aliasCount), source.isMutation()
+                ? "Aliased Mutations: " + aliasCount + " copies of your mutation (⚠ Review!)"
+                : "Aliased Mutations: " + aliasCount
+                        + " (⚠ PLACEHOLDER - load a mutation request first)");
     }
 
     private void applyBatchMutations() {
-        currentAttackMode = "batch";
+        String mutation = originalQuery != null && source.isMutation()
+                ? originalQuery
+                : GraphQLPayloads.TYPENAME_MUTATION;
 
-        String mutation = originalQuery != null && extractedOperationType.equals("mutation")
-            ? originalQuery
-            : "mutation { __typename }";
-
-        JsonArray batch = new JsonArray();
-        for (int i = 0; i < batchCount; i++) {
-            JsonObject item = new JsonObject();
-            item.addProperty("query", mutation);
-            batch.add(item);
-        }
-
-        queryArea.setText(PRETTY_GSON.toJson(batch));
-        statusLabel.setText("Batch Mutations: " + batchCount + " (⚠ Review before sending!)");
+        setPayloadText(GraphQLPayloadWriter.json(
+                GraphQLPayloadWriter.repeated(source, mutation, batchCount)));
+        statusLabel.setText(source.isMutation()
+                ? "Batch Mutations: " + batchCount
+                        + " copies of your mutation (⚠ Review before sending!)"
+                : "Batch Mutations: " + batchCount
+                        + " (⚠ PLACEHOLDER - load a mutation request first)");
     }
 
     private void applyMixedMutationBatch() {
-        currentAttackMode = "batch";
+        boolean hasMutation = source.isMutation() && originalQuery != null;
 
-        boolean hasMutation = extractedOperationType.equals("mutation") && originalQuery != null;
+        String even = hasMutation ? originalQuery : GraphQLPayloads.TYPENAME_MUTATION;
+        String odd = hasMutation || originalQuery == null
+                ? GraphQLPayloads.TYPENAME_PROBE
+                : originalQuery;
 
-        JsonArray batch = new JsonArray();
-
-        if (hasMutation) {
-
-            for (int i = 0; i < batchCount; i++) {
-                JsonObject item = new JsonObject();
-                item.addProperty("query", i % 2 == 0 ? originalQuery : "query { __typename }");
-                batch.add(item);
-            }
-            queryArea.setText(PRETTY_GSON.toJson(batch));
-            statusLabel.setText("Mixed Batch: " + batchCount + " items - mutation + queries interleaved (⚠ Review!)");
-        } else {
-
-            for (int i = 0; i < batchCount; i++) {
-                JsonObject item = new JsonObject();
-                if (i % 2 == 0) {
-                    item.addProperty("query", "mutation { __typename }  # REPLACE with real mutation");
-                } else {
-                    item.addProperty("query", originalQuery != null ? originalQuery : "query { __typename }");
-                }
-                batch.add(item);
-            }
-            queryArea.setText(PRETTY_GSON.toJson(batch));
-            statusLabel.setText("Mixed Batch: PLACEHOLDER - load a mutation request first or edit manually");
-        }
+        setPayloadText(GraphQLPayloadWriter.json(
+                GraphQLPayloadWriter.alternating(source, even, odd, batchCount)));
+        statusLabel.setText(hasMutation
+                ? "Mixed Batch: " + batchCount
+                        + " items - mutation + queries interleaved (⚠ Review!)"
+                : "Mixed Batch: " + batchCount
+                        + " items - PLACEHOLDER mutation, load a mutation request first");
     }
 
     private void applyMutationFragments() {
-        currentAttackMode = "query";
-
-        StringBuilder sb = new StringBuilder();
-
-        String mutationType = extractedOperationType.equals("mutation") ? "Mutation" : "Mutation";
-
-        for (int i = 0; i < fragmentCount; i++) {
-            sb.append("fragment MF").append(i).append(" on ").append(mutationType).append(" { __typename }\n");
-        }
-
-        sb.append("\nmutation GripMutationFragments {\n");
-        for (int i = 0; i < fragmentCount; i++) {
-            sb.append("  ...MF").append(i).append("\n");
-        }
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Mutation Fragments: " + fragmentCount + " unique fragments (each = separate resolution)");
+        emit(GraphQLPayloads.mutationFragments(source, fragmentCount), source.isMutation()
+                ? "Mutation Fragments: " + fragmentCount
+                        + " inline fragments around your mutation (⚠ Review!)"
+                : "Mutation Fragments: " + fragmentCount
+                        + " inline fragments - load a mutation request to wrap a real mutation");
     }
 
     private void applyDepthProbe(int depth) {
-        currentAttackMode = "query";
-        StringBuilder sb = new StringBuilder();
-        sb.append("query GripDepthProbe").append(depth).append(" {\n");
-
-        String indent = "  ";
-        sb.append(indent).append("__schema {\n");
-        indent += "  ";
-
-        for (int i = 0; i < depth; i++) {
-            sb.append(indent).append("types {\n");
-            indent += "  ";
-            sb.append(indent).append("name\n");
-            sb.append(indent).append("fields {\n");
-            indent += "  ";
-            sb.append(indent).append("name\n");
-            sb.append(indent).append("type {\n");
-            indent += "  ";
-        }
-
-        sb.append(indent).append("name\n");
-
-        for (int i = 0; i < depth; i++) {
-            indent = indent.substring(2);
-            sb.append(indent).append("}\n");
-            indent = indent.substring(2);
-            sb.append(indent).append("}\n");
-            indent = indent.substring(2);
-            sb.append(indent).append("}\n");
-        }
-
-        indent = indent.substring(2);
-        sb.append(indent).append("}\n");
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Depth Probe: " + depth + " levels - check if server rejects");
+        emit(GraphQLPayloads.depthProbe(depth),
+                "Depth Probe: " + depth + " nested fields/type levels - check if server rejects");
     }
 
     private void applyWidthProbe(int width) {
-        currentAttackMode = "query";
-        StringBuilder sb = new StringBuilder();
-        sb.append("query GripWidthProbe").append(width).append(" {\n");
-
-        for (int i = 0; i < width; i++) {
-            sb.append("  a").append(i).append(": __typename\n");
-        }
-        sb.append("}");
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", sb.toString());
-        setQueryOutput(body, "Width Probe: " + width + " aliases - check if server rejects");
+        emit(GraphQLPayloads.widthProbe(width),
+                "Width Probe: " + width + " aliases - check if server rejects");
     }
 
     private void applyBatchProbe(int size) {
-        currentAttackMode = "batch";
-
-        JsonArray batch = new JsonArray();
-        for (int i = 0; i < size; i++) {
-            JsonObject item = new JsonObject();
-            item.addProperty("query", "query { __typename }");
-            batch.add(item);
-        }
-
-        queryArea.setText(PRETTY_GSON.toJson(batch));
+        setPayloadText(GraphQLPayloadWriter.json(GraphQLPayloadWriter.repeated(
+                source, GraphQLPayloads.TYPENAME_PROBE, size)));
         statusLabel.setText("Batch Probe: " + size + " queries - check if server rejects");
     }
 
     private void applyDirectiveOverloading(String directive) {
-        currentAttackMode = "query";
-
-        StringBuilder directives = new StringBuilder();
-        for (int i = 0; i < directiveCount; i++) {
-            if (directive.equals("include")) {
-                directives.append("@include(if: true) ");
-            } else {
-                directives.append("@skip(if: false) ");
-            }
-        }
-
-        String fieldName = extractedFieldName != null ? extractedFieldName : "__typename";
-        String query;
-
-        if (extractedFieldCall != null && extractedFieldCall.contains("{")) {
-
-            int braceIndex = extractedFieldCall.indexOf('{');
-            String beforeBrace = extractedFieldCall.substring(0, braceIndex).trim();
-            String afterBrace = extractedFieldCall.substring(braceIndex);
-            query = extractedOperationType + " Grip" + directive.substring(0,1).toUpperCase() +
-                    directive.substring(1) + "Overload {\n  " + beforeBrace + " " + directives + afterBrace + "\n}";
-        } else {
-
-            query = extractedOperationType + " Grip" + directive.substring(0,1).toUpperCase() +
-                    directive.substring(1) + "Overload {\n  " + fieldName + " " + directives + "\n}";
-        }
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "@" + directive + " Overloading: " + directiveCount + " directives");
+        emit(GraphQLPayloads.directiveOverloading(source, directive, directiveCount),
+                "@" + directive + " Overloading: " + directiveCount + " directives");
     }
 
-    private void applyDeferTest() {
-        currentAttackMode = "query";
-        String query = "query GripDeferTest {\n  __schema {\n    queryType {\n      name\n    }\n    ... @defer {\n      types {\n        name\n      }\n    }\n  }\n}";
 
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "@defer Test: Check if incremental delivery is supported");
+
+    private void applyDeferTest() {
+        emit(GraphQLPayloads.DEFER_TEST,
+                "@defer Test: Check if incremental delivery is supported");
     }
 
     private void applyStreamTest() {
-        currentAttackMode = "query";
-        String query = "query GripStreamTest {\n  __schema {\n    types @stream(initialCount: 1) {\n      name\n      kind\n    }\n  }\n}";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "@stream Test: Check if streaming is supported");
+        emit(GraphQLPayloads.STREAM_TEST,
+                "@stream Test: Check if streaming is supported");
     }
 
     private void applyMixedDirectives() {
-        currentAttackMode = "query";
-
-        StringBuilder directives = new StringBuilder();
-        for (int i = 0; i < directiveCount; i++) {
-            if (i % 2 == 0) {
-                directives.append("@include(if: true) ");
-            } else {
-                directives.append("@skip(if: false) ");
-            }
-        }
-
-        String fieldName = extractedFieldName != null ? extractedFieldName : "__typename";
-        String query;
-
-        if (extractedFieldCall != null && extractedFieldCall.contains("{")) {
-
-            int braceIndex = extractedFieldCall.indexOf('{');
-            String beforeBrace = extractedFieldCall.substring(0, braceIndex).trim();
-            String afterBrace = extractedFieldCall.substring(braceIndex);
-            query = extractedOperationType + " GripMixedDirectives {\n  " + beforeBrace + " " + directives + afterBrace + "\n}";
-        } else {
-
-            query = extractedOperationType + " GripMixedDirectives {\n  " + fieldName + " " + directives + "\n}";
-        }
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Mixed Directives: " + directiveCount + " alternating @include/@skip");
+        emit(GraphQLPayloads.mixedDirectives(source, directiveCount),
+                "Mixed Directives: " + directiveCount + " alternating @include/@skip");
     }
 
     private void applyDirectiveDiscovery() {
-        currentAttackMode = "query";
-        String query = "query GripDirectiveDiscovery {\n  __schema {\n    directives {\n      name\n      description\n      locations\n      args {\n        name\n        type { name kind }\n        defaultValue\n      }\n    }\n  }\n}";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Directive Discovery: Lists all available directives");
+        emit(GraphQLPayloads.DIRECTIVE_DISCOVERY,
+                "Directive Discovery: Lists all available directives");
     }
 
     private void applyLongOperationName() {
-        currentAttackMode = "query";
-        StringBuilder opName = new StringBuilder("GripLongName");
-        for (int i = 0; i < 100; i++) {
-            opName.append("AAAAAAAAAA");
-        }
-
-        String query = "query " + opName + " { __typename }";
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Long Operation Name: 1000+ characters");
+        emit(GraphQLPayloads.longOperationName(),
+                "Long Operation Name: 1000+ characters");
     }
 
     private void applySpecialCharsOperationName() {
-        currentAttackMode = "query";
-
-        String query = "query _______GripSpecial_____ { __typename }";
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Special Chars: Underscores at edges");
+        emit(GraphQLPayloads.SPECIAL_CHARS_OPERATION_NAME,
+                "Special Chars: Underscores at edges");
     }
 
     private void applyUnicodeOperationName() {
-        currentAttackMode = "query";
-
-        String query = "query Grip\u00e9\u00e8\u00ea { __typename }";
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Unicode Operation Name: éèê characters");
+        emit(GraphQLPayloads.UNICODE_OPERATION_NAME,
+                "Unicode Operation Name: éèê characters, invalid per spec");
     }
 
     private void applyReservedWordsOperationName() {
-        currentAttackMode = "query";
-        String query = "query query { __typename }";
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Reserved Words: 'query' as operation name");
+        emit(GraphQLPayloads.RESERVED_WORDS_OPERATION_NAME,
+                "Reserved Words: 'query' as operation name");
     }
 
     private void applyFieldSuggestionProbe() {
-        currentAttackMode = "query";
-
-        String query = "query GripFieldProbe {\n" +
-            "  usr { id }\n" +
-            "  userr { id }\n" +
-            "  getUser { id }\n" +
-            "  currentUsr { id }\n" +
-            "  me { id }\n" +
-            "  viewer { id }\n" +
-            "  accoun { id }\n" +
-            "}";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Field Suggestion Probe: Typos to trigger 'Did you mean?' hints");
+        emit(GraphQLPayloads.fieldSuggestionProbe(source),
+                "Field Suggestion Probe: names near the captured field plus common guesses");
     }
 
     private void applyTypeEnumeration() {
-        currentAttackMode = "query";
-        String query = "query GripTypeEnum {\n" +
-            "  user: __type(name: \"User\") { name fields { name } }\n" +
-            "  account: __type(name: \"Account\") { name fields { name } }\n" +
-            "  post: __type(name: \"Post\") { name fields { name } }\n" +
-            "  order: __type(name: \"Order\") { name fields { name } }\n" +
-            "  product: __type(name: \"Product\") { name fields { name } }\n" +
-            "  admin: __type(name: \"Admin\") { name fields { name } }\n" +
-            "  query: __type(name: \"Query\") { name fields { name } }\n" +
-            "  mutation: __type(name: \"Mutation\") { name fields { name } }\n" +
-            "}";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Type Enumeration: Query common type names");
+        emit(GraphQLPayloads.TYPE_ENUMERATION,
+                "Type Enumeration: Query common type names");
     }
 
     private void applyFullIntrospection() {
-        currentAttackMode = "query";
-        String query = "query IntrospectionQuery { __schema { queryType { name } mutationType { name } subscriptionType { name } types { kind name description fields(includeDeprecated: true) { name description args { name description type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } defaultValue } type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } isDeprecated deprecationReason } inputFields { name description type { kind name ofType { kind name ofType { kind name } } } defaultValue } interfaces { kind name ofType { kind name } } enumValues(includeDeprecated: true) { name description isDeprecated deprecationReason } possibleTypes { kind name } } directives { name description locations args { name description type { kind name ofType { kind name } } defaultValue } } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Full Introspection Query");
+        emit(GraphQLPayloads.FULL_INTROSPECTION,
+                "Full Introspection Query");
     }
 
     private void applyTracing() {
-        currentAttackMode = "tracing";
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-
         JsonObject body = new JsonObject();
-        body.addProperty("query", query);
+        body.addProperty("query",
+                originalQuery != null ? originalQuery : GraphQLPayloads.TYPENAME_PROBE);
 
         JsonObject extensions = new JsonObject();
         extensions.addProperty("tracing", true);
@@ -1284,11 +879,9 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     }
 
     private void applyDebugMode() {
-        currentAttackMode = "debug";
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-
         JsonObject body = new JsonObject();
-        body.addProperty("query", query);
+        body.addProperty("query",
+                originalQuery != null ? originalQuery : GraphQLPayloads.TYPENAME_PROBE);
 
         JsonObject extensions = new JsonObject();
         extensions.addProperty("debug", true);
@@ -1300,199 +893,167 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     }
 
     private void applyIntrospectionBypass() {
-        currentAttackMode = "query";
-        String query = "query { __type(name: \"Query\") { name fields { name type { name kind ofType { name } } } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Introspection Bypass: Using __type instead of __schema");
+        emit(GraphQLPayloads.TYPE_BYPASS,
+                "Introspection Bypass: __type instead of __schema"
+                        + " - if the root type is not named Query, retry with the __typename value");
     }
 
     private void applyTypenameProbe() {
-        currentAttackMode = "query";
-        String query = "query { __typename }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "__typename Probe: May reveal info even when introspection is blocked");
+        emit(GraphQLPayloads.TYPENAME_PROBE,
+                "__typename Probe: May reveal info even when introspection is blocked");
     }
 
     private void applyBypassNewline() {
-        currentAttackMode = "query";
-        String query = "query { __schema\n{ types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Newline Bypass: Regex patterns often match __schema{ without newlines");
+        emit(GraphQLPayloads.BYPASS_NEWLINE,
+                "Newline Bypass: Regex patterns often match __schema{ without newlines");
     }
 
     private void applyBypassTab() {
-        currentAttackMode = "query";
-        String query = "query { __schema\t{ types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Tab Bypass: Tab character between __schema and brace");
+        emit(GraphQLPayloads.BYPASS_TAB,
+                "Tab Bypass: Tab character between __schema and brace");
     }
 
     private void applyBypassCRLF() {
-        currentAttackMode = "query";
-        String query = "query { __schema\r\n{ types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "CRLF Bypass: Windows-style line endings may bypass Unix regex");
+        emit(GraphQLPayloads.BYPASS_CRLF,
+                "CRLF Bypass: Windows-style line endings may bypass Unix regex");
     }
 
     private void applyBypassFragment() {
-        currentAttackMode = "query";
-        String query = "fragment SchemaFields on __Schema { types { name fields { name } } }\n" +
-                       "query { __schema { ...SchemaFields } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Fragment Bypass: Using fragments to access __schema indirectly");
+        emit(GraphQLPayloads.BYPASS_FRAGMENT,
+                "Fragment Bypass: Reaching __schema through a fragment on __Schema");
     }
 
     private void applyBypassInlineFragment() {
-        currentAttackMode = "query";
-        String query = "query { ... on Query { __schema { types { name } } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Inline Fragment Bypass: Wrapping in inline fragment");
+        emit(GraphQLPayloads.BYPASS_INLINE_FRAGMENT,
+                "Inline Fragment Bypass: no type condition, so it is valid on any schema");
     }
 
     private void applyBypassAlias() {
-        currentAttackMode = "query";
-        String query = "query { s: __schema { types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Aliased Bypass: Aliasing __schema may bypass string matching");
+        emit(GraphQLPayloads.BYPASS_ALIAS,
+                "Aliased Bypass: Aliasing __schema may bypass string matching");
     }
 
     private void applyBypassBatch() {
-        currentAttackMode = "batch";
         JsonArray batch = new JsonArray();
+        batch.add(GraphQLPayloadWriter.body(null, GraphQLPayloads.TYPENAME_PROBE));
+        batch.add(GraphQLPayloadWriter.body(null, GraphQLPayloads.BYPASS_ALIAS));
 
-        JsonObject item1 = new JsonObject();
-        item1.addProperty("query", "query { __typename }");
-        batch.add(item1);
-
-        JsonObject item2 = new JsonObject();
-        item2.addProperty("query", "query { __schema { types { name } } }");
-        batch.add(item2);
-
-        queryArea.setText(PRETTY_GSON.toJson(batch));
-        statusLabel.setText("Batch Bypass: Introspection hidden in batch array");
+        setPayloadText(GraphQLPayloadWriter.json(batch));
+        statusLabel.setText("Batch Bypass: Introspection hidden in a batch array");
     }
 
     private void applyBypassIncludeDirective() {
-        currentAttackMode = "query";
-        String query = "query($v: Boolean! = true) { __schema @include(if: $v) { types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "@include Bypass: Directive may confuse static pattern matching");
+        emit(GraphQLPayloads.BYPASS_INCLUDE,
+                "@include Bypass: Directive may confuse static pattern matching");
     }
 
     private void applyBypassSkipDirective() {
-        currentAttackMode = "query";
-        String query = "query($v: Boolean! = false) { __schema @skip(if: $v) { types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "@skip Bypass: @skip(if:false) still executes the field");
+        emit(GraphQLPayloads.BYPASS_SKIP,
+                "@skip Bypass: @skip(if:false) still executes the field");
     }
 
     private void applyBypassLongOpName() {
-        currentAttackMode = "query";
-        StringBuilder opName = new StringBuilder();
-        for (int i = 0; i < 50; i++) {
-            opName.append("AAAAAAAAAA");
-        }
-        String query = "query " + opName + " { __schema { types { name } } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Long OpName Bypass: May exceed WAF pattern matching buffers");
+        emit(GraphQLPayloads.bypassLongOperationName(),
+                "Long OpName Bypass: May exceed WAF pattern matching buffers");
     }
 
     private void applyBypassGetMethod() {
-        currentAttackMode = "get";
-        String query = "{ __schema { types { name } } }";
-        queryArea.setText(query);
-        statusLabel.setText("GET Method Bypass: WAF rules may only inspect POST bodies");
+        currentTransport = PayloadTransport.GET;
+        emit(GraphQLPayloads.BYPASS_GET,
+                "GET Method Bypass: WAF rules may only inspect POST bodies");
     }
 
     private void applyErrorTrigger() {
-        currentAttackMode = "query";
-        String query = "query { __nonExistentField__12345(invalidArg: 999) { alsoInvalid } }";
-
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Error Trigger: Invalid query to expose error details");
+        emit(GraphQLPayloads.ERROR_TRIGGER,
+                "Error Trigger: Invalid query to expose error details");
     }
 
     private void applyFingerprint() {
-        currentAttackMode = "query";
-        String query = "query { __schema { description directives { name description locations args { name } } } }";
+        emit(GraphQLPayloads.FINGERPRINT,
+                "Engine Fingerprint: root type names and the directive set");
+    }
 
-        JsonObject body = new JsonObject();
-        body.addProperty("query", query);
-        setQueryOutput(body, "Engine Fingerprint: Query directives and schema description");
+    private void convertToJson() {
+        switchTransport(PayloadTransport.JSON);
     }
 
     private void convertToGet() {
-        currentAttackMode = "get";
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-        queryArea.setText(query);
-        statusLabel.setText("GET Mode: query will be URL-encoded into the query parameter");
+        switchTransport(PayloadTransport.GET);
     }
 
     private void convertToUrlEncoded() {
-        currentAttackMode = "urlencoded";
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-        queryArea.setText(query);
-        statusLabel.setText("URL-Encoded: query will be encoded as form data");
+        switchTransport(PayloadTransport.FORM);
     }
 
     private void convertToMultipart() {
-        currentAttackMode = "multipart";
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-        queryArea.setText(query);
-        statusLabel.setText("Multipart: query will be wrapped in a form-data part");
+        switchTransport(PayloadTransport.MULTIPART);
+    }
+
+    private void switchTransport(PayloadTransport transport) {
+        if (!PayloadDispatch.accepts(transport, isBatchPayload())) {
+            statusLabel.setText("Still " + currentTransport.description()
+                    + " - a batch payload can only be sent as "
+                    + PayloadTransport.JSON.description()
+                    + ", generate a single operation first");
+            return;
+        }
+
+        currentTransport = transport;
+        statusLabel.setText("Request format: " + transport.description()
+                + " - on send, the payload above is " + transport.sendsAs());
+    }
+
+    private boolean isBatchPayload() {
+        try {
+            return JsonParser.parseString(payloadText()).isJsonArray();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private void applyPersistedQueryHash() {
-        currentAttackMode = "query";
-        String query = originalQuery != null ? originalQuery : "query { __typename }";
-
-        String hashHex;
-        try {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] hashBytes = digest.digest(query.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hexString = new StringBuilder();
-            for (byte b : hashBytes) {
-                hexString.append(String.format("%02x", b));
-            }
-            hashHex = hexString.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            hashHex = "0".repeat(64);
-        }
+        String query = originalQuery != null ? originalQuery : GraphQLPayloads.TYPENAME_PROBE;
+        String sent = GraphQLPayloadWriter.body(source, query).get("query").getAsString();
 
         JsonObject body = new JsonObject();
-        body.addProperty("query", query);
+        body.addProperty("query", sent);
 
-        JsonObject extensions = new JsonObject();
         JsonObject persistedQuery = new JsonObject();
         persistedQuery.addProperty("version", 1);
-        persistedQuery.addProperty("sha256Hash", hashHex);
+        persistedQuery.addProperty("sha256Hash", GraphQLPayloads.sha256(sent));
+
+        JsonObject extensions = new JsonObject();
         extensions.add("persistedQuery", persistedQuery);
         body.add("extensions", extensions);
 
-        setQueryOutput(body, "APQ: Real SHA256 hash - test if server accepts persisted queries");
+        setQueryOutput(body, "APQ: SHA256 of the query as sent"
+                + " - test if the server accepts persisted queries");
+    }
+
+
+    private JsonObject capturedEnvelope() {
+        if (capturedTransport != PayloadTransport.JSON
+                || originalRequestBody == null || originalRequestBody.isBlank()) {
+            return null;
+        }
+        try {
+            JsonElement parsed = JsonParser.parseString(originalRequestBody);
+            return parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    static String contentTypeOf(HttpRequest request) {
+        if (request == null) {
+            return null;
+        }
+        for (HttpHeader header : request.headers()) {
+            if ("content-type".equalsIgnoreCase(header.name())) {
+                return header.value();
+            }
+        }
+        return null;
     }
 
     private String extractQueryFromRequest(HttpRequest request) {
@@ -1500,7 +1061,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         return GraphQLRequestDetector.extractQuery(
                 request.method(),
                 request.path(),
-                request.headerValue("Content-Type"),
+                contentTypeOf(request),
                 request.bodyToString());
     }
 
@@ -1509,7 +1070,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         return GraphQLRequestDetector.isGraphQLRequest(
                 request.method(),
                 request.path(),
-                request.headerValue("Content-Type"),
+                contentTypeOf(request),
                 request.bodyToString());
     }
 
@@ -1533,18 +1094,16 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
             return "The GraphQL query cannot be empty";
         }
 
-        if ("get".equals(currentAttackMode) ||
-                "urlencoded".equals(currentAttackMode) ||
-                "multipart".equals(currentAttackMode)) {
-            return null;
-        }
-
         try {
             JsonElement payload = JsonParser.parseString(content);
             if (payload.isJsonObject()) {
                 return validateOperation(payload.getAsJsonObject(), "Request");
             }
             if (payload.isJsonArray()) {
+                if (!currentTransport.supportsBatch()) {
+                    return "A batch payload can only be sent as "
+                            + PayloadTransport.JSON.description();
+                }
                 JsonArray operations = payload.getAsJsonArray();
                 if (operations.size() == 0) {
                     return "The GraphQL batch cannot be empty";
@@ -1580,6 +1139,21 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         return null;
     }
 
+    private String loadedStatus() {
+        if (source.syntaxError() != null) {
+            return "Loaded, but the query did not parse: " + source.syntaxError();
+        }
+
+        StringBuilder status = new StringBuilder("Loaded. Field: '")
+                .append(source.rootFieldName()).append("'");
+        int declared = source.declaredVariables().size();
+        if (declared > 0) {
+            status.append(". Carrying ").append(declared).append(" variable(s)");
+        }
+        status.append(". Select attack pattern.  |  ").append(currentTransport.description());
+        return status.toString();
+    }
+
     private void showValidationError(String message) {
         SwingUtilities.invokeLater(() -> statusLabel.setText("ERROR: " + message));
     }
@@ -1588,7 +1162,7 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
     public HttpRequest getRequest() {
         if (currentRequest == null) return null;
 
-        String content = queryArea.getText();
+        String content = payloadText();
         if (content == null || content.isEmpty()) {
             return currentRequest;
         }
@@ -1600,61 +1174,60 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
         }
 
         try {
-            switch (currentAttackMode) {
-                case "get":
-                    String encodedQuery = URLEncoder.encode(content, StandardCharsets.UTF_8);
-                    String basePath = currentRequest.path().split("\\?")[0];
-                    return currentRequest
-                            .withMethod("GET")
-                            .withPath(basePath + "?query=" + encodedQuery)
-                            .withRemovedHeader("Content-Type")
-                            .withBody("");
+            JsonElement payload = JsonParser.parseString(content);
 
-                case "urlencoded":
-                    String urlEncodedBody = "query=" + URLEncoder.encode(content, StandardCharsets.UTF_8);
-                    return currentRequest
-                            .withMethod("POST")
-                            .withUpdatedHeader("Content-Type", "application/x-www-form-urlencoded")
-                            .withBody(urlEncodedBody);
-
-                case "multipart":
-                    String boundary = "----GripBoundary" + System.currentTimeMillis();
-                    String multipartBody = "--" + boundary + "\r\n" +
-                            "Content-Disposition: form-data; name=\"query\"\r\n\r\n" +
-                            content + "\r\n--" + boundary + "--\r\n";
-                    return currentRequest
-                            .withMethod("POST")
-                            .withUpdatedHeader("Content-Type", "multipart/form-data; boundary=" + boundary)
-                            .withBody(multipartBody);
-
-                case "batch":
-
-                    try {
-                        JsonParser.parseString(content);
-                    } catch (Exception jsonEx) {
-                        statusLabel.setText("ERROR: Invalid JSON in batch mode - " + jsonEx.getMessage());
-                        return currentRequest;
-                    }
-                    return currentRequest
-                            .withMethod("POST")
-                            .withUpdatedHeader("Content-Type", "application/json")
-                            .withBody(content);
-
-                case "query":
-                case "tracing":
-                case "debug":
-                default:
-
-                    return currentRequest
-                            .withMethod("POST")
-                            .withUpdatedHeader("Content-Type", "application/json")
-                            .withBody(content);
+            if (payload.isJsonArray() || currentTransport == PayloadTransport.JSON) {
+                return jsonRequest(content);
             }
+
+            JsonObject envelope = payload.getAsJsonObject();
+            return switch (currentTransport) {
+                case GET -> urlRequest(envelope);
+                case FORM -> formRequest(envelope);
+                case MULTIPART -> multipartRequest(envelope);
+                default -> jsonRequest(content);
+            };
         } catch (Exception e) {
             api.logging().logToError("[GraphQL Grip] Failed to build modified request: " + e.getMessage());
             showValidationError("Could not build request: " + e.getMessage());
             return currentRequest;
         }
+    }
+
+    private HttpRequest bodyCarryingRequest() {
+        return currentRequest.withPath(
+                PayloadDispatch.pathWithoutOperationParameters(currentRequest.path()));
+    }
+
+    private HttpRequest jsonRequest(String content) {
+        return bodyCarryingRequest()
+                .withMethod("POST")
+                .withUpdatedHeader("Content-Type", "application/json")
+                .withBody(content);
+    }
+
+    private HttpRequest urlRequest(JsonObject envelope) {
+        return currentRequest
+                .withMethod("GET")
+                .withPath(PayloadDispatch.appendParameters(currentRequest.path(),
+                        GraphQLPayloadWriter.parameters(envelope, source)))
+                .withRemovedHeader("Content-Type")
+                .withBody("");
+    }
+
+    private HttpRequest formRequest(JsonObject envelope) {
+        return bodyCarryingRequest()
+                .withMethod("POST")
+                .withUpdatedHeader("Content-Type", "application/x-www-form-urlencoded")
+                .withBody(GraphQLPayloadWriter.parameters(envelope, source));
+    }
+
+    private HttpRequest multipartRequest(JsonObject envelope) {
+        String boundary = "----GripBoundary" + System.currentTimeMillis();
+        return bodyCarryingRequest()
+                .withMethod("POST")
+                .withUpdatedHeader("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .withBody(GraphQLPayloadWriter.multipartBody(envelope, source, boundary));
     }
 
     @Override
@@ -1663,38 +1236,44 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
             currentRequest = null;
             originalQuery = null;
             originalRequestBody = null;
-            queryArea.setText("No request loaded");
-            initialEditorContent = queryArea.getText();
+            source = GraphQLOperationSource.empty();
+            setPayloadText("No request loaded");
+            initialEditorContent = payloadText();
             return;
         }
 
         currentRequest = requestResponse.request();
         originalRequestBody = currentRequest.bodyToString();
         originalQuery = extractQueryFromRequest(currentRequest);
-        currentAttackMode = "query";
+        capturedTransport = PayloadTransport.of(currentRequest.method(),
+                contentTypeOf(currentRequest));
+        currentTransport = capturedTransport;
 
-        extractFieldFromQuery(originalQuery);
+        source = GraphQLOperationSource.from(currentRequest);
 
-        if (originalRequestBody != null && !originalRequestBody.isEmpty()) {
-            try {
-                JsonObject parsed = JsonParser.parseString(originalRequestBody).getAsJsonObject();
-                queryArea.setText(PRETTY_GSON.toJson(parsed));
-            } catch (Exception e) {
-                queryArea.setText(originalRequestBody);
-            }
-            statusLabel.setText("Loaded. Field: '" + extractedFieldName + "'. Select attack pattern.");
-        } else if (originalQuery != null) {
-            JsonObject body = new JsonObject();
-            body.addProperty("query", originalQuery);
-            queryArea.setText(PRETTY_GSON.toJson(body));
-            statusLabel.setText("Loaded. Field: '" + extractedFieldName + "'. Select attack pattern.");
-        } else {
-            JsonObject defaultBody = new JsonObject();
-            defaultBody.addProperty("query", "query { __typename }");
-            queryArea.setText(PRETTY_GSON.toJson(defaultBody));
-            statusLabel.setText("No query found - using default");
+        renderCapturedRequest();
+        initialEditorContent = payloadText();
+    }
+
+    private void renderCapturedRequest() {
+        JsonObject captured = capturedEnvelope();
+        if (captured != null) {
+            setPayloadText(GraphQLPayloadWriter.json(captured));
+            statusLabel.setText(loadedStatus());
+            return;
         }
-        initialEditorContent = queryArea.getText();
+
+        if (originalQuery != null) {
+            setPayloadText(GraphQLPayloadWriter.json(
+                    GraphQLPayloadWriter.body(source, originalQuery)));
+            statusLabel.setText(loadedStatus());
+            return;
+        }
+
+        JsonObject defaultBody = new JsonObject();
+        defaultBody.addProperty("query", "query { __typename }");
+        setPayloadText(GraphQLPayloadWriter.json(defaultBody));
+        statusLabel.setText("No query found - using default  |  " + currentTransport.description());
     }
 
     @Override
@@ -1716,12 +1295,12 @@ public class GripRequestEditor implements ExtensionProvidedHttpRequestEditor {
 
     @Override
     public Selection selectedData() {
-        return null;
+        return queryEditor == null ? null : queryEditor.selection().orElse(null);
     }
 
     @Override
     public boolean isModified() {
-        if (initialEditorContent == null) return false;
-        return !initialEditorContent.equals(queryArea.getText());
+        return PayloadDispatch.isModified(capturedTransport, currentTransport,
+                initialEditorContent, payloadText());
     }
 }

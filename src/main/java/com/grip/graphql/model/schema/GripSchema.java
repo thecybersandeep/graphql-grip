@@ -236,17 +236,19 @@ public class GripSchema {
 
         StringBuilder sb = new StringBuilder();
 
-        sb.append("schema {\n");
-        if (queryTypeName != null) {
-            sb.append("  query: ").append(queryTypeName).append("\n");
+        if (queryTypeName != null || mutationTypeName != null || subscriptionTypeName != null) {
+            sb.append("schema {\n");
+            if (queryTypeName != null) {
+                sb.append("  query: ").append(queryTypeName).append("\n");
+            }
+            if (mutationTypeName != null) {
+                sb.append("  mutation: ").append(mutationTypeName).append("\n");
+            }
+            if (subscriptionTypeName != null) {
+                sb.append("  subscription: ").append(subscriptionTypeName).append("\n");
+            }
+            sb.append("}\n\n");
         }
-        if (mutationTypeName != null) {
-            sb.append("  mutation: ").append(mutationTypeName).append("\n");
-        }
-        if (subscriptionTypeName != null) {
-            sb.append("  subscription: ").append(subscriptionTypeName).append("\n");
-        }
-        sb.append("}\n\n");
 
         for (GripType type : types.values()) {
             if (!type.isIntrospectionType() && !type.isBuiltInScalar()) {
@@ -255,7 +257,7 @@ public class GripSchema {
         }
 
         for (GripDirective directive : directives) {
-            if (!directive.isBuiltIn()) {
+            if (!directive.isBuiltIn() && !directive.getLocations().isEmpty()) {
                 sb.append(directive.toGraphQLString()).append("\n");
             }
         }

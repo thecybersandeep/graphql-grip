@@ -2,10 +2,14 @@ package com.grip.graphql.ui;
 
 import com.grip.graphql.GripCore;
 import com.grip.graphql.model.schema.*;
+import com.grip.graphql.schema.GraphQLEndpointPaths;
 import com.grip.graphql.schema.IntrospectionHandler;
+import com.grip.graphql.schema.SdlSchemaReader;
+import com.grip.graphql.schema.IntrospectionLadder;
 import com.grip.graphql.schema.SchemaReconstructor;
 import com.grip.graphql.http.GripHttpClient;
 import com.grip.graphql.http.GraphQLResponseAnalyzer;
+import com.grip.graphql.http.GraphQLTransport;
 import com.grip.graphql.security.GripEngineFingerprinter;
 import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpRequestResponse;
@@ -60,6 +64,8 @@ public class GripMainTab extends JPanel {
     private JButton discoverBtn;
     private JButton cancelBtn;
     private volatile boolean scanning = false;
+    private volatile boolean cancelRequested = false;
+    private volatile SchemaReconstructor activeReconstructor;
 
     @SuppressWarnings("this-escape")
     public GripMainTab(GripCore core) {
@@ -150,7 +156,7 @@ public class GripMainTab extends JPanel {
         targetField = new JTextField();
         targetField.setFont(theme.getNormalFont());
         theme.styleTextField(targetField);
-        addPlaceholder(targetField, "https://example.com/graphql");
+        addPlaceholder(targetField, TARGET_PLACEHOLDER);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, GripTheme.SPACING_SM, GripTheme.SPACING_SM));
 
@@ -268,17 +274,31 @@ public class GripMainTab extends JPanel {
     }
 
     public void triggerScan() {
-        scanning = false;
-        setScanningState(false);
         runFullScan();
     }
 
-    private void runFullScan() {
+    private boolean beginRun(String label) {
         if (scanning) {
-            appendLog("[!] Scan already in progress");
-            return;
+            appendLog("[!] " + label + " not started: another run is already in progress");
+            return false;
         }
-        String endpoint = targetField.getText().trim();
+        cancelRequested = false;
+        setScanningState(true);
+        return true;
+    }
+
+    private void endRun() {
+        activeReconstructor = null;
+        cancelRequested = false;
+        setScanningState(false);
+    }
+
+    private boolean cancelled() {
+        return cancelRequested;
+    }
+
+    private void runFullScan() {
+        String endpoint = targetEndpoint();
         if (endpoint.isEmpty()) {
             clearLog();
             appendLogStyled("✗ Error: Enter an endpoint URL", "error");
@@ -291,7 +311,9 @@ public class GripMainTab extends JPanel {
         }
 
         applyCustomHeaders();
-        setScanningState(true);
+        if (!beginRun("Scan")) {
+            return;
+        }
 
         clearLog();
         appendLogStyled("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "header");
@@ -301,61 +323,87 @@ public class GripMainTab extends JPanel {
 
         CompletableFuture.runAsync(() -> {
             try {
-                appendLog("[*] Testing introspection...");
+                appendLog("[*] Probing transports and introspection...");
 
-                IntrospectionHandler handler = new IntrospectionHandler(core.getHttpClient());
+                IntrospectionLadder.Outcome outcome = IntrospectionLadder.probe(
+                        (transport, query) -> {
+                            HttpRequestResponse probe = core.getHttpClient()
+                                    .send(transport, endpoint, query, "Scanner Probe");
+                            if (probe == null || probe.response() == null) {
+                                return null;
+                            }
+                            return new IntrospectionLadder.Response(
+                                    probe.response().statusCode(),
+                                    probe.response().headerValue("Content-Type"),
+                                    probe.response().bodyToString());
+                        },
+                        message -> appendLog("[*] " + message),
+                        this::cancelled);
 
-                HttpRequestResponse response = core.getHttpClient().sendQueryWithLog(
-                        endpoint,
-                        "query { __schema { queryType { name } } }",
-                        "Introspection Test"
-                );
-
-                if (response == null || response.response() == null) {
-                    appendLogStyled("[!] No response from server. Check endpoint URL and authentication.", "error");
+                if (cancelled()) {
+                    appendLogStyled("[*] Scan cancelled after " + outcome.attempts()
+                            + " probe(s)", "error");
                     return;
                 }
 
-                GraphQLResponseAnalyzer.Analysis analysis =
-                        GraphQLResponseAnalyzer.analyzeIntrospectionResponse(
-                                response.response().statusCode(),
-                                response.response().headerValue("Content-Type"),
-                                response.response().bodyToString());
+                if (!outcome.graphQL()) {
+                    appendLogStyled("[!] Not a GraphQL endpoint over any transport", "error");
+                    appendLog("[*] " + outcome.attempts() + " probe(s) sent across POST JSON, GET and form encoded");
+                    appendLog("[*] If this is a base URL, run 'Discover Paths' first and scan the endpoint it finds");
+                    appendLog("[*] Otherwise check the path and any required authentication headers");
+                    return;
+                }
 
-                if (!analysis.isGraphQL()) {
-                    appendLogStyled("[!] Not a GraphQL endpoint: " + analysis.getDetail(), "error");
-                    appendLog("[*] Verify the endpoint URL and any required authentication headers.");
-                } else if (analysis.isExpectedFieldAvailable()) {
-                    appendLog("[+] Introspection ENABLED - fetching full schema...");
+                appendLogStyled("[+] GraphQL confirmed over " + describeTransports(outcome.transports()), "success");
 
-                    GripSchema schema = handler.fetchSchema(endpoint).join();
-
-                    if (schema != null) {
-                        schema.setSourceEndpoint(endpoint);
-                        currentSchema = schema;
-                        appendLog("[+] Schema fetched: " + schema.getTypeCount() + " types, " +
-                                schema.getQueries().size() + " queries, " +
-                                schema.getMutations().size() + " mutations");
-
-                        SwingUtilities.invokeLater(() -> {
-                            getOrCreateSchemaTab();
-                            currentSchemaTab.endpoint = endpoint;
-                            if (currentSchemaTab.endpointField != null) {
-                                currentSchemaTab.endpointField.setText(endpoint);
-                            }
-                            populateSchemaTree(schema);
-                            tabbedPane.setSelectedIndex(1);
-                        });
-
-                        appendLog("[*] Schema loaded - check Schema tab to browse and craft requests");
-                    }
-                } else {
-                    appendLog("[-] GraphQL endpoint confirmed, but introspection is unavailable");
-                    if (analysis.getDetail() != null && !analysis.getDetail().isBlank()) {
-                        appendLog("[*] Server response: " + analysis.getDetail());
+                if (!outcome.introspectionAvailable()) {
+                    appendLog("[-] Introspection is blocked, and no bypass variant got through");
+                    if (outcome.detail() != null && !outcome.detail().isBlank()) {
+                        appendLog("[*] Server response: " + outcome.detail());
                     }
                     appendLog("[*] Try 'Blind Discovery' to reconstruct schema");
+                    return;
                 }
+
+                if (outcome.bypassed()) {
+                    appendLogStyled("[+] Introspection filter bypassed using " + outcome.bypass().description()
+                            + " over " + outcome.transport().description(), "success");
+                } else {
+                    appendLog("[+] Introspection ENABLED over " + outcome.transport().description());
+                }
+
+                appendLog("[*] Fetching full schema...");
+                GripSchema schema = new IntrospectionHandler(core.getHttpClient())
+                        .fetchSchema(endpoint, outcome.transport(), outcome.bypass()).join();
+
+                if (schema == null) {
+                    appendLogStyled("[!] The probe succeeded but the full schema could not be fetched", "error");
+                    appendLog("[*] Try 'Blind Discovery' to reconstruct schema");
+                    return;
+                }
+
+                schema.setSourceEndpoint(endpoint);
+                currentSchema = schema;
+                appendLog("[+] Schema fetched: " + schema.getTypeCount() + " types, " +
+                        schema.getQueries().size() + " queries, " +
+                        schema.getMutations().size() + " mutations");
+
+                SwingUtilities.invokeLater(() -> {
+                    getOrCreateSchemaTab();
+                    currentSchemaTab.endpoint = endpoint;
+                    currentSchemaTab.transport = outcome.transport();
+                    if (currentSchemaTab.endpointField != null) {
+                        currentSchemaTab.endpointField.setText(endpoint);
+                    }
+                    if (currentSchemaTab.transportBox != null) {
+                        currentSchemaTab.transportBox.setSelectedItem(outcome.transport());
+                    }
+                    populateSchemaTree(schema);
+                    tabbedPane.setSelectedIndex(1);
+                });
+
+                appendLog("[*] Schema loaded - requests from the Schema tab will use "
+                        + outcome.transport().description());
 
             } catch (Exception e) {
                 Throwable cause = e;
@@ -370,17 +418,24 @@ public class GripMainTab extends JPanel {
                 }
                 core.logError("runFullScan failed: " + cause.getMessage());
             } finally {
-                setScanningState(false);
+                endRun();
             }
         }, core.getHttpClient().getExecutor());
     }
 
-    private void runBlindDiscovery() {
-        if (scanning) {
-            appendLog("[!] Scan already in progress");
-            return;
+    private String describeTransports(List<GraphQLTransport> transports) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < transports.size(); i++) {
+            if (i > 0) {
+                out.append(i == transports.size() - 1 ? " and " : ", ");
+            }
+            out.append(transports.get(i).description());
         }
-        String endpoint = targetField.getText().trim();
+        return out.toString();
+    }
+
+    private void runBlindDiscovery() {
+        String endpoint = targetEndpoint();
         if (endpoint.isEmpty()) {
             clearLog();
             appendLogStyled("✗ Error: Enter an endpoint URL", "error");
@@ -399,13 +454,19 @@ public class GripMainTab extends JPanel {
         appendLogStyled("  Blind Schema Discovery", "title");
         appendLogStyled("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "header");
         appendLog("[*] This may take a while...");
-        setScanningState(true);
+        if (!beginRun("Blind discovery")) {
+            return;
+        }
 
         CompletableFuture.runAsync(() -> {
             SchemaReconstructor reconstructor = null;
             try {
                 reconstructor = new SchemaReconstructor(core.getHttpClient());
                 reconstructor.setProgressCallback(msg -> appendLog(msg));
+                activeReconstructor = reconstructor;
+                if (cancelled()) {
+                    reconstructor.cancel();
+                }
 
                 GripSchema schema = reconstructor.reconstructSchema(endpoint).join();
 
@@ -441,13 +502,13 @@ public class GripMainTab extends JPanel {
                 if (reconstructor != null) {
                     reconstructor.shutdown();
                 }
-                setScanningState(false);
+                endRun();
             }
         }, core.getHttpClient().getExecutor());
     }
 
     private void runEngineFingerprint() {
-        String endpoint = targetField.getText().trim();
+        String endpoint = targetEndpoint();
         if (endpoint.isEmpty()) {
             clearLog();
             appendLogStyled("✗ Error: Enter an endpoint URL", "error");
@@ -460,6 +521,9 @@ public class GripMainTab extends JPanel {
         }
 
         applyCustomHeaders();
+        if (!beginRun("Fingerprinting")) {
+            return;
+        }
 
         appendLogStyled("", "normal");
         appendLogStyled("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "header");
@@ -494,30 +558,19 @@ public class GripMainTab extends JPanel {
                     appendLog("[!] Error: " + cause.getMessage());
                 }
                 core.logError("runEngineFingerprint failed: " + cause.getMessage());
+            } finally {
+                endRun();
             }
         }, core.getHttpClient().getExecutor());
     }
 
-    private static final String[] GRAPHQL_PATHS = {
-        "graphql", "graphiql", "playground", "altair", "explorer",
-        "graphql/console", "graphql-explorer", "subscriptions", "api/graphql", "graph",
-        "graphiql.css", "graphiql/finland", "graphiql.js", "graphiql.min.css",
-        "graphiql.min.js", "graphiql.php", "graphql.php",
-        "graphql/schema.json", "graphql/schema.xml", "graphql/schema.yaml",
-        "v1/graphql", "v1/graphiql", "v1/playground", "v1/altair", "v1/explorer",
-        "v1/graphql/console", "v1/graphql-explorer", "v1/api/graphql", "v1/graph",
-        "v2/graphql", "v2/graphiql", "v2/playground", "v2/altair", "v2/explorer",
-        "v2/graphql/console", "v2/graphql-explorer", "v2/api/graphql", "v2/graph",
-        "v3/graphql", "v3/graphiql", "v3/playground", "v3/api/graphql",
-        "v4/graphql", "v4/graphiql", "v4/playground", "v4/api/graphql",
-        "api/v1/graphql", "api/v2/graphql", "api/v3/graphql",
-        "query", "gql", "data", "api/data", "api/query",
-        "console", "dev/graphql", "test/graphql", "staging/graphql",
-        "__graphql", "_graphql", "graphql-api", "graphql/v1", "graphql/v2"
-    };
+    private static final String TARGET_PLACEHOLDER = "https://example.com/graphql";
+
+    private static final List<GraphQLTransport> DISCOVERY_TRANSPORTS =
+            List.of(GraphQLTransport.POST_JSON, GraphQLTransport.GET);
 
     private void runEndpointDiscovery() {
-        String baseUrl = targetField.getText().trim();
+        String baseUrl = targetEndpoint();
         if (baseUrl.isEmpty()) {
             clearLog();
             appendLogStyled("✗ Error: Enter a base URL (e.g., https://example.com/)", "error");
@@ -550,13 +603,20 @@ public class GripMainTab extends JPanel {
         }
 
         final String finalBaseUrl = baseUrl;
+        if (!beginRun("Endpoint discovery")) {
+            return;
+        }
+
         clearLog();
         appendLogStyled("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "header");
         appendLogStyled("  GraphQL Endpoint Discovery", "title");
         appendLogStyled("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "header");
         appendLogStyled("", "normal");
+        final List<String> paths = GraphQLEndpointPaths.all();
+
         appendLog("[*] Base URL: " + finalBaseUrl);
-        appendLog("[*] Testing " + GRAPHQL_PATHS.length + " common paths...");
+        appendLog("[*] Testing " + paths.size() + " common paths over "
+                + describeTransports(DISCOVERY_TRANSPORTS));
         appendLogStyled("", "normal");
 
         CompletableFuture.runAsync(() -> {
@@ -565,52 +625,60 @@ public class GripMainTab extends JPanel {
             int tested = 0;
             int failedProbes = 0;
 
-            for (String path : GRAPHQL_PATHS) {
+            for (String path : paths) {
+                if (cancelled()) {
+                    appendLogStyled("[*] Cancelled after " + tested + " of " + paths.size()
+                            + " path(s)", "error");
+                    break;
+                }
                 tested++;
                 String testUrl = finalBaseUrl + path;
 
-                try {
+                for (GraphQLTransport transport : DISCOVERY_TRANSPORTS) {
+                    try {
+                        HttpRequestResponse response = core.getHttpClient().send(
+                                transport, testUrl, IntrospectionLadder.TYPENAME_PROBE,
+                                "Endpoint Discovery");
 
-                    JsonObject queryBody = new JsonObject();
-                    queryBody.addProperty("query", "query{__typename}");
-
-                    Map<String, String> headers = new HashMap<>(customHeaders);
-                    headers.put("Content-Type", "application/json");
-
-                    HttpRequestResponse response = core.getHttpClient().sendRaw(
-                        testUrl, "POST", queryBody.toString(), headers
-                    );
-
-                    int status = response.response().statusCode();
-                    String body = response.response().bodyToString();
-
-                    String contentType = response.response().headerValue("Content-Type");
-                    GraphQLResponseAnalyzer.Analysis analysis =
-                            GraphQLResponseAnalyzer.analyzeEndpointProbe(status, contentType, body);
-
-                    if (analysis.isGraphQL()) {
-                        foundEndpoints.add(testUrl);
-                        appendLog("[+] FOUND: " + testUrl + " (" + analysis.getEvidence() + ")");
-                    }
-
-                    String ideEvidence = GraphQLResponseAnalyzer.graphQLIdeEvidence(
-                            status, contentType, body);
-                    if (ideEvidence != null) {
-                        if (!foundEndpoints.contains(testUrl)) {
-                            foundEndpoints.add(testUrl);
-                            appendLog("[+] FOUND UI: " + testUrl + " (" + ideEvidence + ")");
+                        if (response == null || response.response() == null) {
+                            failedProbes++;
+                            continue;
                         }
-                    }
 
-                } catch (Exception e) {
-                    failedProbes++;
-                    core.logError("Endpoint discovery probe failed for " + testUrl + ": " + e.getMessage());
+                        int status = response.response().statusCode();
+                        String body = response.response().bodyToString();
+                        String contentType = response.response().headerValue("Content-Type");
+
+                        GraphQLResponseAnalyzer.Analysis analysis =
+                                GraphQLResponseAnalyzer.analyzeEndpointProbe(status, contentType, body);
+
+                        if (analysis.isGraphQL()) {
+                            foundEndpoints.add(testUrl);
+                            appendLog("[+] FOUND: " + testUrl + " over " + transport.description()
+                                    + " (" + analysis.getEvidence() + ")");
+                            break;
+                        }
+
+                        String ideEvidence = GraphQLResponseAnalyzer.graphQLIdeEvidence(
+                                status, contentType, body);
+                        if (ideEvidence != null) {
+                            foundEndpoints.add(testUrl);
+                            appendLog("[+] FOUND UI: " + testUrl + " over " + transport.description()
+                                    + " (" + ideEvidence + ")");
+                            break;
+                        }
+
+                    } catch (Exception e) {
+                        failedProbes++;
+                        core.logError("Endpoint discovery probe failed for " + testUrl + " over "
+                                + transport.description() + ": " + e.getMessage());
+                    }
                 }
 
                 if (tested % 10 == 0) {
                     final int t = tested;
                     SwingUtilities.invokeLater(() -> {
-                        showStatus("Scanning... " + t + "/" + GRAPHQL_PATHS.length, false);
+                        showStatus("Scanning... " + t + "/" + paths.size(), false);
                     });
                 }
             }
@@ -626,7 +694,9 @@ public class GripMainTab extends JPanel {
                     appendLogStyled("    → " + ep, "success");
                 }
                 appendLogStyled("", "normal");
-                appendLog("[*] Click on an endpoint above and paste into Target field to scan");
+                setTargetEndpoint(foundEndpoints.get(0));
+                appendLog("[*] Target set to " + foundEndpoints.get(0)
+                        + " - press 'Scan & Introspect' to continue");
             }
             if (failedProbes > 0) {
                 appendLog("[!] " + failedProbes + " probe(s) failed - check connectivity, TLS, or authentication");
@@ -644,6 +714,8 @@ public class GripMainTab extends JPanel {
             } catch (Exception e) {
                 core.logError("runEndpointDiscovery failed: " + e.getMessage());
                 appendLog("[!] Error: " + e.getMessage());
+            } finally {
+                endRun();
             }
         }, core.getHttpClient().getExecutor());
     }
@@ -748,7 +820,7 @@ public class GripMainTab extends JPanel {
             if (currentSchemaTab != null && !currentSchemaTab.endpoint.isEmpty()) {
                 runIntrospection(currentSchemaTab.endpoint);
             } else {
-                String endpoint = targetField.getText().trim();
+                String endpoint = targetEndpoint();
                 if (!endpoint.isEmpty()) {
                     runIntrospection(endpoint);
                 } else {
@@ -793,7 +865,7 @@ public class GripMainTab extends JPanel {
 
         SchemaGraphPanel graphPanel = new SchemaGraphPanel(core);
         tabData.graphPanel = graphPanel;
-        viewTabs.addTab("Graph View", graphPanel);
+        viewTabs.addTab("Graph View", wrapGraphView(graphPanel));
 
         schemaTabbedPane.addTab(tabName, viewTabs);
         int tabIndex = schemaTabbedPane.getTabCount() - 1;
@@ -830,6 +902,25 @@ public class GripMainTab extends JPanel {
         createNewSchemaTab();
     }
 
+    private JPanel wrapGraphView(SchemaGraphPanel graphPanel) {
+        JButton fitBtn = createSecondaryButton("Fit to View",
+                "Zoom and centre so every drawn type is visible");
+        fitBtn.addActionListener(e -> graphPanel.fitToView());
+
+        JButton resetBtn = createSecondaryButton("Reset Layout",
+                "Lay the types out again from the root types and clear any focus");
+        resetBtn.addActionListener(e -> graphPanel.resetView());
+
+        JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, GripTheme.SPACING_SM, 0));
+        toolbar.add(fitBtn);
+        toolbar.add(resetBtn);
+
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.add(toolbar, BorderLayout.NORTH);
+        wrapper.add(graphPanel, BorderLayout.CENTER);
+        return wrapper;
+    }
+
     private JPanel createSchemaTreePanel(SchemaTabData tabData) {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
 
@@ -840,24 +931,29 @@ public class GripMainTab extends JPanel {
         endpointField.setFont(theme.getNormalFont());
         tabData.endpointField = endpointField;
 
-        endpointField.addActionListener(e -> {
-            tabData.endpoint = endpointField.getText().trim();
+        endpointField.addActionListener(e -> applySchemaEndpoint(tabData, endpointField));
+
+        JComboBox<GraphQLTransport> transportBox = new JComboBox<>(GraphQLTransport.values());
+        transportBox.setFont(theme.getNormalFont());
+        transportBox.setSelectedItem(tabData.transport);
+        transportBox.setToolTipText("How requests built from this schema are sent");
+        transportBox.addActionListener(e -> {
+            tabData.transport = (GraphQLTransport) transportBox.getSelectedItem();
             if (tabData.graphPanel != null) {
-                tabData.graphPanel.setEndpoint(tabData.endpoint);
+                tabData.graphPanel.setTransport(tabData.transport);
             }
         });
+        tabData.transportBox = transportBox;
 
         JButton setEndpointBtn = new JButton("Set Endpoint");
-        setEndpointBtn.addActionListener(e -> {
-            tabData.endpoint = endpointField.getText().trim();
-            if (tabData.graphPanel != null) {
-                tabData.graphPanel.setEndpoint(tabData.endpoint);
-            }
-            showStatus("Endpoint set: " + tabData.endpoint, false);
-        });
+        setEndpointBtn.addActionListener(e -> applySchemaEndpoint(tabData, endpointField));
+
+        JPanel endpointControls = new JPanel(new FlowLayout(FlowLayout.LEFT, GripTheme.SPACING_SM, 0));
+        endpointControls.add(transportBox);
+        endpointControls.add(setEndpointBtn);
 
         endpointPanel.add(endpointField, BorderLayout.CENTER);
-        endpointPanel.add(setEndpointBtn, BorderLayout.EAST);
+        endpointPanel.add(endpointControls, BorderLayout.EAST);
 
         JPanel headersPanel = new JPanel(new BorderLayout(5, 5));
         headersPanel.setBorder(theme.createTitledBorder("Request Headers"));
@@ -1146,6 +1242,7 @@ public class GripMainTab extends JPanel {
         populateHeadersFromClient(tabData);
 
         if (tabData.graphPanel != null) {
+            tabData.graphPanel.setTransport(tabData.transport);
             tabData.graphPanel.setSchema(schema, tabData.endpoint);
         }
 
@@ -1408,26 +1505,14 @@ public class GripMainTab extends JPanel {
         }
 
         try {
-            JsonObject body = new JsonObject();
-            body.addProperty("query", query);
-
-            HttpRequest request = core.getHttpClient().buildPostRequest(endpoint, body.toString());
-
-            Map<String, String> headersToUse = (currentSchemaTab != null)
-                ? currentSchemaTab.getHeaders()
-                : customHeaders;
-            for (Map.Entry<String, String> header : headersToUse.entrySet()) {
-                if (!header.getValue().isEmpty()) {
-                    request = request.withUpdatedHeader(header.getKey(), header.getValue());
-                }
-            }
+            HttpRequest request = buildSchemaRequest(endpoint, query);
 
             String operationName = extractOperationName(query);
             String tabName = "GraphQL Grip - " + operationName;
 
             core.getApi().repeater().sendToRepeater(request, tabName);
 
-            showStatus("Sent to Repeater: " + tabName, false);
+            showStatus("Sent to Repeater as " + schemaTransport().description(), false);
         } catch (Exception e) {
             showStatus("Error: " + e.getMessage(), true);
         }
@@ -1451,26 +1536,63 @@ public class GripMainTab extends JPanel {
         }
 
         try {
-            JsonObject body = new JsonObject();
-            body.addProperty("query", query);
-
-            HttpRequest request = core.getHttpClient().buildPostRequest(endpoint, body.toString());
-
-            Map<String, String> headersToUse = (currentSchemaTab != null)
-                ? currentSchemaTab.getHeaders()
-                : customHeaders;
-            for (Map.Entry<String, String> header : headersToUse.entrySet()) {
-                if (!header.getValue().isEmpty()) {
-                    request = request.withUpdatedHeader(header.getKey(), header.getValue());
-                }
-            }
+            HttpRequest request = buildSchemaRequest(endpoint, query);
 
             core.getApi().intruder().sendToIntruder(request);
 
-            showStatus("Sent to Intruder", false);
+            showStatus("Sent to Intruder as " + schemaTransport().description(), false);
         } catch (Exception e) {
             showStatus("Error: " + e.getMessage(), true);
         }
+    }
+
+    private void applySchemaEndpoint(SchemaTabData tabData, JTextField endpointField) {
+        String endpoint = endpointField.getText().trim();
+
+        if (endpoint.isEmpty()) {
+            showStatus("Enter an endpoint URL before setting it", true);
+            return;
+        }
+        if (!isValidUrl(endpoint)) {
+            showStatus("Not a valid endpoint: " + endpoint
+                    + " - it must start with http:// or https:// and include a host", true);
+            return;
+        }
+
+        tabData.endpoint = endpoint;
+        endpointField.setText(endpoint);
+        if (tabData.graphPanel != null) {
+            tabData.graphPanel.setEndpoint(endpoint);
+        }
+        showStatus("Endpoint set: " + endpoint, false);
+    }
+
+    private GraphQLTransport schemaTransport() {
+        return currentSchemaTab != null ? currentSchemaTab.transport : GraphQLTransport.POST_JSON;
+    }
+
+    private HttpRequest buildSchemaRequest(String endpoint, String query) {
+        GraphQLTransport transport = schemaTransport();
+        HttpRequest request = core.getHttpClient().buildRequest(transport, endpoint, query);
+
+        Map<String, String> headersToUse = currentSchemaTab != null
+                ? currentSchemaTab.getHeaders()
+                : customHeaders;
+
+        for (Map.Entry<String, String> header : headersToUse.entrySet()) {
+            if (header.getValue().isEmpty()) {
+                continue;
+            }
+            if (!transport.carriesBody() && "Content-Type".equalsIgnoreCase(header.getKey())) {
+                continue;
+            }
+            request = request.withUpdatedHeader(header.getKey(), header.getValue());
+        }
+
+        if (transport.carriesBody()) {
+            request = request.withUpdatedHeader("Content-Type", transport.contentType());
+        }
+        return request;
     }
 
     private String extractOperationName(String query) {
@@ -1493,7 +1615,7 @@ public class GripMainTab extends JPanel {
             return currentSchemaTab.endpoint;
         }
 
-        return targetField.getText().trim();
+        return targetEndpoint();
     }
 
     private void executeSelectedQuery() {
@@ -1513,9 +1635,12 @@ public class GripMainTab extends JPanel {
             return;
         }
 
+        final GraphQLTransport transport = schemaTransport();
+
         CompletableFuture.runAsync(() -> {
             try {
-                HttpRequestResponse response = core.getHttpClient().sendQueryWithLog(endpoint, query, "Schema Browser");
+                HttpRequestResponse response = core.getHttpClient()
+                        .send(transport, endpoint, query, "Schema Browser");
 
                 SwingUtilities.invokeLater(() -> {
 
@@ -1571,7 +1696,7 @@ public class GripMainTab extends JPanel {
         if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             java.io.File file = fileChooser.getSelectedFile();
 
-            String defaultEndpoint = targetField.getText().trim();
+            String defaultEndpoint = targetEndpoint();
             if (defaultEndpoint.isEmpty()) {
                 defaultEndpoint = "http://localhost:8080/graphql";
             }
@@ -1630,14 +1755,20 @@ public class GripMainTab extends JPanel {
                 protected void done() {
                     try {
                         GripSchema schema = get();
-                        if (schema != null) {
-                            currentSchema = schema;
-                            populateSchemaTree(schema);
-                            showStatus(statusMessage, false);
+                        if (schema == null || schema.getTypeCount() == 0) {
+                            showStatus("No types found in " + fileName, true);
+                            return;
                         }
+                        if (currentSchemaTab == null) {
+                            createNewSchemaTab();
+                        }
+                        currentSchema = schema;
+                        populateSchemaTree(schema);
+                        showStatus(statusMessage, false);
                     } catch (Exception e) {
-                        String msg = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
-                        showStatus("Error importing schema: " + msg, true);
+                        Throwable cause = e.getCause() != null ? e.getCause() : e;
+                        showStatus("Error importing schema: " + cause.getMessage(), true);
+                        core.logError("Schema import failed: " + cause);
                     }
                 }
 
@@ -1655,8 +1786,8 @@ public class GripMainTab extends JPanel {
                     }
 
                     if (schemaData != null) {
-                        IntrospectionHandler handler = new IntrospectionHandler(core.getHttpClient());
-                        GripSchema schema = handler.parseIntrospectionResult(schemaData, endpoint);
+                        GripSchema schema = IntrospectionHandler.parseIntrospectionResult(
+                                schemaData, endpoint, core.getHttpClient());
                         statusMessage = "Schema imported: " + schema.getTypeCount() + " types, " +
                                 schema.getQueries().size() + " queries, " +
                                 schema.getMutations().size() + " mutations";
@@ -1667,45 +1798,10 @@ public class GripMainTab extends JPanel {
                 }
 
                 private GripSchema parseSDLSchema(String sdl, String endpoint) {
-                    GripSchema schema = new GripSchema();
-                    schema.setSourceEndpoint(endpoint);
-                    schema.setQueryTypeName("Query");
-
-                    GripType queryType = new GripType("Query", GripTypeKind.OBJECT);
-
-                    java.util.regex.Pattern typePattern = java.util.regex.Pattern.compile(
-                            "type\\s+(\\w+)\\s*\\{([^}]+)\\}",
-                            java.util.regex.Pattern.MULTILINE | java.util.regex.Pattern.DOTALL);
-                    java.util.regex.Matcher typeMatcher = typePattern.matcher(sdl);
-
-                    while (typeMatcher.find()) {
-                        String typeName = typeMatcher.group(1);
-                        String fieldsBlock = typeMatcher.group(2);
-
-                        GripType type = new GripType(typeName, GripTypeKind.OBJECT);
-
-                        java.util.regex.Pattern fieldPattern = java.util.regex.Pattern.compile(
-                                "(\\w+)(?:\\([^)]*\\))?\\s*:\\s*([\\[\\]\\w!]+)");
-                        java.util.regex.Matcher fieldMatcher = fieldPattern.matcher(fieldsBlock);
-
-                        while (fieldMatcher.find()) {
-                            String fieldName = fieldMatcher.group(1);
-                            String fieldType = fieldMatcher.group(2);
-                            type.addField(new GripField(fieldName, GripTypeRef.fromString(fieldType)));
-                        }
-
-                        schema.addType(type);
-
-                        if ("Query".equals(typeName)) {
-                            queryType = type;
-                        }
-                    }
-
-                    if (!schema.hasType("Query")) {
-                        schema.addType(queryType);
-                    }
-
-                    statusMessage = "SDL schema imported: " + schema.getTypeCount() + " types (basic parsing)";
+                    GripSchema schema = SdlSchemaReader.read(sdl, endpoint);
+                    statusMessage = "SDL schema imported: " + schema.getTypeCount() + " types, "
+                            + schema.getQueries().size() + " queries, "
+                            + schema.getMutations().size() + " mutations";
                     return schema;
                 }
             }.execute();
@@ -1802,8 +1898,16 @@ public class GripMainTab extends JPanel {
 
     public void setTargetEndpoint(String endpoint) {
         if (endpoint != null && !endpoint.isEmpty()) {
-            SwingUtilities.invokeLater(() -> targetField.setText(endpoint));
+            SwingUtilities.invokeLater(() -> {
+                targetField.setText(endpoint);
+                targetField.setForeground(theme.getForeground());
+            });
         }
+    }
+
+    private String targetEndpoint() {
+        String text = targetField.getText().trim();
+        return TARGET_PLACEHOLDER.equals(text) ? "" : text;
     }
 
     private void setScanningState(boolean isScanning) {
@@ -1814,13 +1918,24 @@ public class GripMainTab extends JPanel {
             fingerprintBtn.setEnabled(!isScanning);
             discoverBtn.setEnabled(!isScanning);
             cancelBtn.setVisible(isScanning);
+            cancelBtn.setEnabled(isScanning);
         });
     }
 
     private void cancelScan() {
-        scanning = false;
-        appendLog("[*] Cancelling scan...");
-        setScanningState(false);
+        if (!scanning) {
+            return;
+        }
+
+        cancelRequested = true;
+
+        SchemaReconstructor running = activeReconstructor;
+        if (running != null) {
+            running.cancel();
+        }
+
+        appendLog("[*] Cancelling after the request in flight finishes...");
+        SwingUtilities.invokeLater(() -> cancelBtn.setEnabled(false));
     }
 
     private boolean isValidUrl(String url) {
@@ -2113,6 +2228,7 @@ public class GripMainTab extends JPanel {
 
     private static class SchemaTabData {
         String endpoint = "";
+        GraphQLTransport transport = GraphQLTransport.POST_JSON;
         GripSchema schema;
         boolean filtered;
 
@@ -2125,6 +2241,7 @@ public class GripMainTab extends JPanel {
 
         JLabel tabLabel;
         JTextField endpointField;
+        JComboBox<GraphQLTransport> transportBox;
 
         DefaultTableModel headersTableModel;
 

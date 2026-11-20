@@ -2,7 +2,7 @@ package com.grip.graphql.ui;
 
 import com.grip.graphql.GripCore;
 import com.grip.graphql.model.schema.*;
-import com.google.gson.JsonObject;
+import com.grip.graphql.http.GraphQLTransport;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.ui.editor.RawEditor;
@@ -19,24 +19,24 @@ public class SchemaGraphPanel extends JPanel {
     private final GripTheme theme;
     private GripSchema schema;
     private String endpoint;
+    private GraphQLTransport transport = GraphQLTransport.POST_JSON;
 
-    private final List<GraphNode> nodes = new ArrayList<>();
-    private final List<GraphEdge> graphEdges = new ArrayList<>();
-    private final Map<String, GraphNode> nodeMap = new HashMap<>();
+    private final SchemaGraphModel graph = new SchemaGraphModel();
 
     private String selectedNodeName = null;
+    private String focusNodeName = null;
+    private String emptyReason = null;
+    private boolean viewTouched = false;
     private String hoveredNodeName = null;
     private Point lastDragPoint = null;
-    private GraphNode draggedNode = null;
+    private SchemaGraphModel.Node draggedNode = null;
     private double viewScale = 1.0;
     private double viewOffsetX = 0;
     private double viewOffsetY = 0;
 
-    private static final int NODE_WIDTH = 140;
-    private static final int NODE_HEIGHT = 36;
-    private static final int HORIZONTAL_GAP = 200;
-    private static final int VERTICAL_GAP = 100;
-    private static final int MARGIN = 80;
+    private static final int NODE_WIDTH = SchemaGraphModel.NODE_WIDTH;
+    private static final int NODE_HEIGHT = SchemaGraphModel.NODE_HEIGHT;
+    private static final int MARGIN = SchemaGraphModel.MARGIN;
 
     private static final Color COLOR_QUERY = new Color(46, 125, 50);
     private static final Color COLOR_MUTATION = new Color(230, 81, 0);
@@ -57,7 +57,18 @@ public class SchemaGraphPanel extends JPanel {
         this.theme = core.getTheme();
         setBackground(new Color(248, 249, 250));
         setDoubleBuffered(true);
+        setFocusable(true);
         initializeMouseHandlers();
+        initializeKeyBindings();
+        addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                if (!viewTouched && !graph.isEmpty()) {
+                    centerView();
+                    repaint();
+                }
+            }
+        });
     }
 
     private void initializeMouseHandlers() {
@@ -66,7 +77,7 @@ public class SchemaGraphPanel extends JPanel {
             public void mousePressed(MouseEvent e) {
                 requestFocusInWindow();
                 Point worldPt = toWorldCoords(e.getPoint());
-                GraphNode clickedNode = findNodeAt(worldPt);
+                SchemaGraphModel.Node clickedNode = findNodeAt(worldPt);
 
                 if (SwingUtilities.isLeftMouseButton(e)) {
                     if (clickedNode != null) {
@@ -99,6 +110,8 @@ public class SchemaGraphPanel extends JPanel {
                 int deltaX = e.getX() - lastDragPoint.x;
                 int deltaY = e.getY() - lastDragPoint.y;
 
+                viewTouched = true;
+
                 if (draggedNode != null) {
 
                     draggedNode.x += deltaX / viewScale;
@@ -116,7 +129,7 @@ public class SchemaGraphPanel extends JPanel {
             @Override
             public void mouseMoved(MouseEvent e) {
                 Point worldPt = toWorldCoords(e.getPoint());
-                GraphNode node = findNodeAt(worldPt);
+                SchemaGraphModel.Node node = findNodeAt(worldPt);
                 String newHover = (node != null) ? node.name : null;
 
                 if (!Objects.equals(newHover, hoveredNodeName)) {
@@ -130,6 +143,7 @@ public class SchemaGraphPanel extends JPanel {
 
             @Override
             public void mouseWheelMoved(MouseWheelEvent e) {
+                viewTouched = true;
                 double prevScale = viewScale;
                 double scaleFactor = (e.getWheelRotation() < 0) ? 1.15 : 0.87;
                 viewScale = Math.max(0.15, Math.min(3.0, viewScale * scaleFactor));
@@ -144,7 +158,7 @@ public class SchemaGraphPanel extends JPanel {
             @Override
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2 && selectedNodeName != null) {
-                    GraphNode node = nodeMap.get(selectedNodeName);
+                    SchemaGraphModel.Node node = graph.node(selectedNodeName);
                     if (node != null) {
                         sendTypeToRepeater(node);
                     }
@@ -157,20 +171,44 @@ public class SchemaGraphPanel extends JPanel {
         addMouseWheelListener(handler);
     }
 
-    private static final int MAX_GRAPH_TYPES = 500;
+    private static final int MAX_GRAPH_NODES = 400;
 
     public void setSchema(GripSchema schema, String endpoint) {
         this.schema = schema;
         this.endpoint = endpoint;
-        if (schema != null && schema.getTypeCount() > MAX_GRAPH_TYPES) {
-            nodes.clear();
-            graphEdges.clear();
-            nodeMap.clear();
-            repaint();
-            return;
-        }
-        buildGraphFromSchema();
-        performGridLayout();
+        this.focusNodeName = null;
+        this.selectedNodeName = null;
+        rebuildGraph();
+    }
+
+    private void initializeKeyBindings() {
+        getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "clearFocus");
+        getActionMap().put("clearFocus", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (focusNodeName != null) {
+                    applyFocus(null);
+                }
+            }
+        });
+    }
+
+    private void applyFocus(String typeName) {
+        focusNodeName = typeName;
+        selectedNodeName = typeName;
+        viewTouched = false;
+        rebuildGraph();
+    }
+
+    private void rebuildGraph() {
+        graph.build(schema, focusNodeName, MAX_GRAPH_NODES);
+        focusNodeName = graph.focusName();
+        draggedNode = null;
+
+        emptyReason = schema != null && graph.isEmpty()
+                ? "This schema has no types to draw"
+                : null;
+
         centerView();
         repaint();
     }
@@ -179,51 +217,22 @@ public class SchemaGraphPanel extends JPanel {
         this.endpoint = endpoint;
     }
 
-    private void buildGraphFromSchema() {
-        nodes.clear();
-        graphEdges.clear();
-        nodeMap.clear();
-
-        if (schema == null) return;
-
-        for (GripType type : schema.getAllTypes()) {
-            String typeName = type.getName();
-            if (typeName.startsWith("__")) continue;
-
-            GraphNode node = new GraphNode(typeName, type);
-            node.nodeColor = determineNodeColor(type);
-            nodes.add(node);
-            nodeMap.put(typeName, node);
-        }
-
-        for (GripType type : schema.getAllTypes()) {
-            if (type.getName().startsWith("__")) continue;
-
-            GraphNode sourceNode = nodeMap.get(type.getName());
-            if (sourceNode == null) continue;
-
-            for (GripField field : type.getFields()) {
-                String targetTypeName = field.getType().getName();
-                if (targetTypeName == null) continue;
-
-                GraphNode targetNode = nodeMap.get(targetTypeName);
-                if (targetNode != null && !targetNode.equals(sourceNode)) {
-                    graphEdges.add(new GraphEdge(sourceNode, targetNode));
-                }
-            }
+    public void setTransport(GraphQLTransport transport) {
+        if (transport != null) {
+            this.transport = transport;
         }
     }
 
     private Color determineNodeColor(GripType type) {
         String name = type.getName();
 
-        if (schema.getQueryTypeName() != null && name.equals(schema.getQueryTypeName())) {
+        if (name.equals(schema.getQueryTypeName())) {
             return COLOR_QUERY;
         }
-        if (schema.getMutationTypeName() != null && name.equals(schema.getMutationTypeName())) {
+        if (name.equals(schema.getMutationTypeName())) {
             return COLOR_MUTATION;
         }
-        if ("Subscription".equals(name)) {
+        if (name.equals(schema.getSubscriptionTypeName())) {
             return COLOR_SUBSCRIPTION;
         }
 
@@ -238,115 +247,20 @@ public class SchemaGraphPanel extends JPanel {
         };
     }
 
-    private void performGridLayout() {
-        if (nodes.isEmpty()) return;
-
-        List<GraphNode> rootNodes = new ArrayList<>();
-        List<GraphNode> interfaceNodes = new ArrayList<>();
-        List<GraphNode> objectNodes = new ArrayList<>();
-        List<GraphNode> unionNodes = new ArrayList<>();
-        List<GraphNode> inputNodes = new ArrayList<>();
-        List<GraphNode> enumNodes = new ArrayList<>();
-        List<GraphNode> scalarNodes = new ArrayList<>();
-
-        for (GraphNode node : nodes) {
-            String name = node.name;
-            GripTypeKind kind = node.type.getKind();
-
-            boolean isRoot = (schema.getQueryTypeName() != null && name.equals(schema.getQueryTypeName())) ||
-                           (schema.getMutationTypeName() != null && name.equals(schema.getMutationTypeName())) ||
-                           "Subscription".equals(name);
-
-            if (isRoot) {
-                rootNodes.add(node);
-            } else if (kind == GripTypeKind.INTERFACE) {
-                interfaceNodes.add(node);
-            } else if (kind == GripTypeKind.UNION) {
-                unionNodes.add(node);
-            } else if (kind == GripTypeKind.INPUT_OBJECT) {
-                inputNodes.add(node);
-            } else if (kind == GripTypeKind.ENUM) {
-                enumNodes.add(node);
-            } else if (kind == GripTypeKind.SCALAR) {
-                scalarNodes.add(node);
-            } else {
-                objectNodes.add(node);
-            }
-        }
-
-        rootNodes.sort(Comparator.comparing(n -> n.name));
-        interfaceNodes.sort(Comparator.comparing(n -> n.name));
-        objectNodes.sort(Comparator.comparing(n -> n.name));
-        unionNodes.sort(Comparator.comparing(n -> n.name));
-        inputNodes.sort(Comparator.comparing(n -> n.name));
-        enumNodes.sort(Comparator.comparing(n -> n.name));
-        scalarNodes.sort(Comparator.comparing(n -> n.name));
-
-        int maxPerRow = Math.max(6, (int) Math.ceil(Math.sqrt(nodes.size())));
-
-        int currentY = MARGIN;
-
-        if (!rootNodes.isEmpty()) {
-            currentY = layoutRowsWithWrap(rootNodes, currentY, maxPerRow);
-        }
-
-        if (!interfaceNodes.isEmpty()) {
-            currentY = layoutRowsWithWrap(interfaceNodes, currentY, maxPerRow);
-        }
-
-        if (!objectNodes.isEmpty()) {
-            currentY = layoutRowsWithWrap(objectNodes, currentY, maxPerRow);
-        }
-
-        if (!unionNodes.isEmpty()) {
-            currentY = layoutRowsWithWrap(unionNodes, currentY, maxPerRow);
-        }
-
-        if (!inputNodes.isEmpty()) {
-            currentY = layoutRowsWithWrap(inputNodes, currentY, maxPerRow);
-        }
-
-        if (!enumNodes.isEmpty()) {
-            currentY = layoutRowsWithWrap(enumNodes, currentY, maxPerRow);
-        }
-
-        if (!scalarNodes.isEmpty()) {
-            layoutRowsWithWrap(scalarNodes, currentY, maxPerRow);
-        }
-    }
-
-    private int layoutRowsWithWrap(List<GraphNode> nodeList, int startY, int maxPerRow) {
-        if (nodeList.isEmpty()) return startY;
-
-        int currentY = startY;
-        int rowCount = 0;
-
-        for (int i = 0; i < nodeList.size(); i++) {
-            int col = i % maxPerRow;
-            int row = i / maxPerRow;
-
-            GraphNode node = nodeList.get(i);
-            node.x = MARGIN + col * HORIZONTAL_GAP + NODE_WIDTH / 2.0;
-            node.y = currentY + row * (VERTICAL_GAP / 2 + NODE_HEIGHT) + NODE_HEIGHT / 2.0;
-
-            rowCount = row + 1;
-        }
-
-        return currentY + rowCount * (VERTICAL_GAP / 2 + NODE_HEIGHT) + VERTICAL_GAP;
-    }
-
     private void centerView() {
-        if (nodes.isEmpty()) {
+        if (graph.isEmpty()) {
             viewScale = 1.0;
             viewOffsetX = getWidth() / 2.0;
             viewOffsetY = getHeight() / 2.0;
             return;
         }
 
-        double minX = Double.MAX_VALUE, maxX = Double.MIN_VALUE;
-        double minY = Double.MAX_VALUE, maxY = Double.MIN_VALUE;
+        double minX = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
 
-        for (GraphNode node : nodes) {
+        for (SchemaGraphModel.Node node : graph.nodes()) {
             minX = Math.min(minX, node.x - NODE_WIDTH / 2.0);
             maxX = Math.max(maxX, node.x + NODE_WIDTH / 2.0);
             minY = Math.min(minY, node.y - NODE_HEIGHT / 2.0);
@@ -359,27 +273,23 @@ public class SchemaGraphPanel extends JPanel {
         int panelWidth = Math.max(getWidth(), 800);
         int panelHeight = Math.max(getHeight(), 600);
 
-        double scaleX = panelWidth / graphWidth;
-        double scaleY = panelHeight / graphHeight;
-        viewScale = Math.min(scaleX, scaleY) * 0.9;
-        viewScale = Math.max(0.2, Math.min(1.5, viewScale));
+        viewScale = Math.min(panelWidth / graphWidth, panelHeight / graphHeight) * 0.9;
+        viewScale = Math.max(0.15, Math.min(1.5, viewScale));
 
-        double centerX = (minX + maxX) / 2.0;
-        double centerY = (minY + maxY) / 2.0;
-        viewOffsetX = panelWidth / 2.0 - centerX * viewScale;
-        viewOffsetY = panelHeight / 2.0 - centerY * viewScale;
+        viewOffsetX = panelWidth / 2.0 - (minX + maxX) / 2.0 * viewScale;
+        viewOffsetY = panelHeight / 2.0 - (minY + maxY) / 2.0 * viewScale;
     }
-
     private Point toWorldCoords(Point screenPoint) {
         double worldX = (screenPoint.x - viewOffsetX) / viewScale;
         double worldY = (screenPoint.y - viewOffsetY) / viewScale;
         return new Point((int) worldX, (int) worldY);
     }
 
-    private GraphNode findNodeAt(Point worldPoint) {
+    private SchemaGraphModel.Node findNodeAt(Point worldPoint) {
 
-        for (int i = nodes.size() - 1; i >= 0; i--) {
-            GraphNode node = nodes.get(i);
+        List<SchemaGraphModel.Node> visible = graph.nodes();
+        for (int i = visible.size() - 1; i >= 0; i--) {
+            SchemaGraphModel.Node node = visible.get(i);
             Rectangle2D bounds = new Rectangle2D.Double(
                 node.x - NODE_WIDTH / 2.0,
                 node.y - NODE_HEIGHT / 2.0,
@@ -405,7 +315,7 @@ public class SchemaGraphPanel extends JPanel {
         g2.translate(viewOffsetX, viewOffsetY);
         g2.scale(viewScale, viewScale);
 
-        if (schema == null || nodes.isEmpty()) {
+        if (schema == null || graph.isEmpty()) {
             g2.dispose();
             drawEmptyState(g);
             return;
@@ -435,24 +345,25 @@ public class SchemaGraphPanel extends JPanel {
         String icon = "\u2B21";
         g2.drawString(icon, centerX - fm.stringWidth(icon) / 2, centerY - 30);
 
+        String headline = emptyReason != null ? "Nothing to Draw" : "No Schema Loaded";
+        String detail = emptyReason != null
+                ? emptyReason
+                : "Import or fetch a schema to view the graph";
+
         g2.setColor(new Color(120, 120, 120));
         g2.setFont(theme.getNormalFont().deriveFont(16f));
         fm = g2.getFontMetrics();
-
-        String msg1 = "No Schema Loaded";
-        String msg2 = "Import or fetch a schema to view the graph";
-        g2.drawString(msg1, centerX - fm.stringWidth(msg1) / 2, centerY + 40);
+        g2.drawString(headline, centerX - fm.stringWidth(headline) / 2, centerY + 40);
 
         g2.setFont(theme.getNormalFont().deriveFont(13f));
         fm = g2.getFontMetrics();
-        g2.drawString(msg2, centerX - fm.stringWidth(msg2) / 2, centerY + 65);
+        g2.drawString(detail, centerX - fm.stringWidth(detail) / 2, centerY + 65);
 
         g2.dispose();
     }
-
     private void drawEdges(Graphics2D g2) {
-        List<GraphEdge> highlighted = null;
-        for (GraphEdge edge : graphEdges) {
+        List<SchemaGraphModel.Edge> highlighted = null;
+        for (SchemaGraphModel.Edge edge : graph.edges()) {
             boolean isHighlighted = selectedNodeName != null &&
                 (edge.source.name.equals(selectedNodeName) || edge.target.name.equals(selectedNodeName));
             if (isHighlighted) {
@@ -463,47 +374,51 @@ public class SchemaGraphPanel extends JPanel {
             }
         }
         if (highlighted != null) {
-            for (GraphEdge edge : highlighted) {
+            for (SchemaGraphModel.Edge edge : highlighted) {
                 drawEdge(g2, edge, true);
             }
         }
     }
 
-    private void drawEdge(Graphics2D g2, GraphEdge edge, boolean highlighted) {
-        if (highlighted) {
-            g2.setColor(COLOR_EDGE_HIGHLIGHT);
-            g2.setStroke(new BasicStroke(2.5f));
-        } else {
-            g2.setColor(COLOR_EDGE);
-            g2.setStroke(new BasicStroke(1.2f));
+    private void drawEdge(Graphics2D g2, SchemaGraphModel.Edge edge, boolean highlighted) {
+        float width = highlighted ? 2.5f : 1.2f;
+        g2.setColor(highlighted ? COLOR_EDGE_HIGHLIGHT : COLOR_EDGE);
+        g2.setStroke(edge.kind == SchemaGraphModel.EdgeKind.FIELD
+                ? new BasicStroke(width)
+                : new BasicStroke(width, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
+                        new float[]{6f, 5f}, 0f));
+
+        if (edge.source == edge.target) {
+            double loopSize = NODE_HEIGHT * 0.8;
+            double x = edge.source.x + NODE_WIDTH / 2.0 - loopSize / 3.0;
+            double y = edge.source.y - NODE_HEIGHT / 2.0 - loopSize / 2.0;
+            g2.draw(new Ellipse2D.Double(x, y, loopSize, loopSize));
+            return;
         }
 
-        double x1 = edge.source.x;
-        double y1 = edge.source.y;
-        double x2 = edge.target.x;
-        double y2 = edge.target.y;
+        double[] p1 = getEdgePoint(edge.source, edge.target.x, edge.target.y);
+        double[] p2 = getEdgePoint(edge.target, edge.source.x, edge.source.y);
 
-        double[] p1 = getEdgePoint(edge.source, x2, y2);
-        double[] p2 = getEdgePoint(edge.target, x1, y1);
-
-        QuadCurve2D curve = new QuadCurve2D.Double();
         double dx = p2[0] - p1[0];
         double dy = p2[1] - p1[1];
         double dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < 0.001) {
+            return;
+        }
+
         double curvature = Math.min(30, dist * 0.15);
+        double midX = (p1[0] + p2[0]) / 2 - dy / dist * curvature;
+        double midY = (p1[1] + p2[1]) / 2 + dx / dist * curvature;
 
-        double nx = -dy / dist * curvature;
-        double ny = dx / dist * curvature;
-        double midX = (p1[0] + p2[0]) / 2 + nx;
-        double midY = (p1[1] + p2[1]) / 2 + ny;
-
+        QuadCurve2D curve = new QuadCurve2D.Double();
         curve.setCurve(p1[0], p1[1], midX, midY, p2[0], p2[1]);
         g2.draw(curve);
 
+        g2.setStroke(new BasicStroke(width));
         drawArrowHead(g2, midX, midY, p2[0], p2[1]);
     }
-
-    private double[] getEdgePoint(GraphNode node, double targetX, double targetY) {
+    private double[] getEdgePoint(SchemaGraphModel.Node node, double targetX, double targetY) {
         double cx = node.x;
         double cy = node.y;
         double halfW = NODE_WIDTH / 2.0;
@@ -542,7 +457,7 @@ public class SchemaGraphPanel extends JPanel {
     }
 
     private void drawNodes(Graphics2D g2) {
-        for (GraphNode node : nodes) {
+        for (SchemaGraphModel.Node node : graph.nodes()) {
             boolean isSelected = node.name.equals(selectedNodeName);
             boolean isHovered = node.name.equals(hoveredNodeName);
 
@@ -564,7 +479,8 @@ public class SchemaGraphPanel extends JPanel {
                 g2.draw(new RoundRectangle2D.Double(x - 2, y - 2, NODE_WIDTH + 4, NODE_HEIGHT + 4, 9, 9));
             }
 
-            Color baseColor = isHovered ? node.nodeColor.brighter() : node.nodeColor;
+            Color nodeColor = determineNodeColor(node.type);
+            Color baseColor = isHovered ? nodeColor.brighter() : nodeColor;
             GradientPaint gradient = new GradientPaint(
                 (float) x, (float) y, baseColor.brighter(),
                 (float) x, (float) (y + NODE_HEIGHT), baseColor
@@ -660,39 +576,54 @@ public class SchemaGraphPanel extends JPanel {
         g2.setFont(theme.getNormalFont().deriveFont(10f));
         g2.setColor(new Color(130, 130, 130));
 
-        String instructions = "Scroll: Zoom | Drag: Pan/Move | Double-click: Repeater | Right-click: Menu";
-        FontMetrics fm = g2.getFontMetrics();
-        int x = (getWidth() - fm.stringWidth(instructions)) / 2;
-        int y = getHeight() - 8;
+        String instructions = focusNodeName != null
+                ? "Scroll: Zoom | Drag: Pan/Move | Esc: Clear focus | Right-click: Menu"
+                : "Scroll: Zoom | Drag: Pan/Move | Double-click: Repeater | Right-click: Menu";
 
-        g2.drawString(instructions, x, y);
+        FontMetrics fm = g2.getFontMetrics();
+        g2.drawString(instructions, (getWidth() - fm.stringWidth(instructions)) / 2,
+                getHeight() - 8);
         g2.dispose();
     }
-
     private void drawStats(Graphics g) {
-        if (schema == null) return;
+        if (schema == null) {
+            return;
+        }
 
         Graphics2D g2 = (Graphics2D) g.create();
         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g2.setFont(theme.getNormalFont().deriveFont(10f));
         g2.setColor(new Color(130, 130, 130));
 
-        String stats = String.format("Types: %d | Edges: %d | Zoom: %.0f%%",
-            nodes.size(), graphEdges.size(), viewScale * 100);
-        FontMetrics fm = g2.getFontMetrics();
-        int x = getWidth() - fm.stringWidth(stats) - 12;
-        int y = getHeight() - 8;
+        StringBuilder stats = new StringBuilder();
+        if (focusNodeName != null) {
+            stats.append("Focus: ").append(focusNodeName).append(" | ");
+        }
+        stats.append(String.format("Types: %d | Edges: %d",
+                graph.nodes().size(), graph.edges().size()));
+        if (graph.hiddenTypeCount() > 0) {
+            stats.append(" | Hidden: ").append(graph.hiddenTypeCount());
+        }
+        stats.append(String.format(" | Zoom: %.0f%%", viewScale * 100));
 
-        g2.drawString(stats, x, y);
+        String text = stats.toString();
+        FontMetrics fm = g2.getFontMetrics();
+        g2.drawString(text, getWidth() - fm.stringWidth(text) - 12, getHeight() - 8);
         g2.dispose();
     }
-
-    private void displayContextMenu(MouseEvent e, GraphNode node) {
+    private void displayContextMenu(MouseEvent e, SchemaGraphModel.Node node) {
         JPopupMenu menu = new JPopupMenu();
 
         JMenuItem viewDetails = new JMenuItem("View Type Details");
         viewDetails.addActionListener(ev -> showTypeDetails(node));
         menu.add(viewDetails);
+
+        boolean focused = node.name.equals(focusNodeName);
+        JMenuItem focus = new JMenuItem(focused
+                ? "Show the Whole Schema"
+                : "Focus on " + node.name + " and Its Neighbours");
+        focus.addActionListener(ev -> applyFocus(focused ? null : node.name));
+        menu.add(focus);
 
         JMenuItem centerOnNode = new JMenuItem("Center on Node");
         centerOnNode.addActionListener(ev -> {
@@ -731,7 +662,7 @@ public class SchemaGraphPanel extends JPanel {
         menu.show(this, e.getX(), e.getY());
     }
 
-    private void showTypeDetails(GraphNode node) {
+    private void showTypeDetails(SchemaGraphModel.Node node) {
         StringBuilder sb = new StringBuilder();
         sb.append("Type: ").append(node.name).append("\n");
         sb.append("Kind: ").append(node.type.getKind()).append("\n\n");
@@ -765,7 +696,7 @@ public class SchemaGraphPanel extends JPanel {
         JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), typePanel, "Type: " + node.name, JOptionPane.INFORMATION_MESSAGE);
     }
 
-    private void sendTypeToRepeater(GraphNode node) {
+    private void sendTypeToRepeater(SchemaGraphModel.Node node) {
         if (endpoint == null || endpoint.isEmpty()) {
             JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), "No endpoint set. Configure endpoint in Schema tab.",
                     "Missing Endpoint", JOptionPane.WARNING_MESSAGE);
@@ -787,7 +718,7 @@ public class SchemaGraphPanel extends JPanel {
         executeRepeaterSend(queryBuilder.toString(), node.name);
     }
 
-    private void sendFieldToRepeater(GraphNode parentNode, GripField field) {
+    private void sendFieldToRepeater(SchemaGraphModel.Node parentNode, GripField field) {
         if (endpoint == null || endpoint.isEmpty()) {
             JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), "No endpoint set. Configure endpoint in Schema tab.",
                     "Missing Endpoint", JOptionPane.WARNING_MESSAGE);
@@ -870,57 +801,28 @@ public class SchemaGraphPanel extends JPanel {
 
     private void executeRepeaterSend(String query, String tabName) {
         try {
-            JsonObject body = new JsonObject();
-            body.addProperty("query", query);
-
-            HttpRequest request = HttpRequest.httpRequestFromUrl(endpoint)
-                    .withMethod("POST")
-                    .withUpdatedHeader("Content-Type", "application/json")
-                    .withBody(body.toString());
+            HttpRequest request = core.getHttpClient().buildRequest(transport, endpoint, query);
 
             core.getApi().repeater().sendToRepeater(request, "GraphQL Grip - " + tabName);
-            JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), "Sent to Repeater!", "Success", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(),
+                    "Sent to Repeater as " + transport.description(), "Success",
+                    JOptionPane.INFORMATION_MESSAGE);
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(core.getApi().userInterface().swingUtils().suiteFrame(), "Error: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
     public void resetView() {
-        viewScale = 1.0;
-        viewOffsetX = 0;
-        viewOffsetY = 0;
-        if (!nodes.isEmpty()) {
-            performGridLayout();
-            centerView();
-        }
-        repaint();
+        focusNodeName = null;
+        selectedNodeName = null;
+        viewTouched = false;
+        rebuildGraph();
     }
 
     public void fitToView() {
+        viewTouched = false;
         centerView();
         repaint();
     }
 
-    private static class GraphNode {
-        String name;
-        GripType type;
-        double x, y;
-        Color nodeColor;
-
-        GraphNode(String name, GripType type) {
-            this.name = name;
-            this.type = type;
-            this.nodeColor = COLOR_OBJECT;
-        }
-    }
-
-    private static class GraphEdge {
-        GraphNode source;
-        GraphNode target;
-
-        GraphEdge(GraphNode source, GraphNode target) {
-            this.source = source;
-            this.target = target;
-        }
-    }
 }

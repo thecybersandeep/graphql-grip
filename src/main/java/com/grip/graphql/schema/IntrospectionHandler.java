@@ -1,11 +1,17 @@
 package com.grip.graphql.schema;
 
+import burp.api.montoya.http.message.HttpRequestResponse;
+import com.grip.graphql.http.GraphQLResponseAnalyzer;
+import com.grip.graphql.http.GraphQLTransport;
 import com.grip.graphql.http.GripHttpClient;
 import com.grip.graphql.model.schema.*;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -143,63 +149,115 @@ public class IntrospectionHandler {
     }
 
     public CompletableFuture<GripSchema> fetchSchema(String endpoint) {
+        return fetchSchema(endpoint, GraphQLTransport.POST_JSON, IntrospectionBypass.NONE);
+    }
+
+    public CompletableFuture<GripSchema> fetchSchema(String endpoint, GraphQLTransport transport,
+                                                     IntrospectionBypass bypass) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                JsonObject response = httpClient.sendQueryAndLog(endpoint, FULL_INTROSPECTION_QUERY, "Introspection (Full)");
-
-                if (response != null && response.has("data") && !response.get("data").isJsonNull()) {
-                    JsonObject data = response.getAsJsonObject("data");
-                    if (data.has("__schema") && !data.get("__schema").isJsonNull()) {
-                        return parseIntrospectionResult(data.getAsJsonObject("__schema"), endpoint);
-                    }
+                GripSchema full = fetch(endpoint, transport, bypass,
+                        FULL_INTROSPECTION_QUERY, "Introspection (Full)");
+                if (full != null) {
+                    return full;
                 }
+
+                GripSchema minimal = fetch(endpoint, transport, bypass,
+                        MINIMAL_INTROSPECTION_QUERY, "Introspection (Minimal)");
+                if (minimal != null) {
+                    minimal.setPartial(true);
+                }
+                return minimal;
             } catch (GripHttpClient.GripAuthException e) {
                 throw new CompletionException(e);
-            } catch (Exception e) {
-                httpClient.logError("Full introspection failed for " + endpoint, e);
             }
-
-            try {
-                JsonObject response = httpClient.sendQueryAndLog(endpoint, MINIMAL_INTROSPECTION_QUERY, "Introspection (Minimal)");
-                if (response != null && response.has("data") && !response.get("data").isJsonNull()) {
-                    JsonObject data = response.getAsJsonObject("data");
-                    if (data.has("__schema") && !data.get("__schema").isJsonNull()) {
-                        GripSchema schema = parseIntrospectionResult(data.getAsJsonObject("__schema"), endpoint);
-                        schema.setPartial(true);
-                        return schema;
-                    }
-                }
-            } catch (GripHttpClient.GripAuthException e) {
-                throw new CompletionException(e);
-            } catch (Exception e) {
-                httpClient.logError("Minimal introspection failed for " + endpoint, e);
-            }
-
-            return null;
         }, executor).orTimeout(120, TimeUnit.SECONDS);
     }
 
-    public CompletableFuture<Boolean> isIntrospectionEnabled(String endpoint) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                String simpleQuery = "query { __schema { queryType { name } } }";
-                JsonObject response = httpClient.sendQueryAndLog(endpoint, simpleQuery, "Introspection Check");
-
-                if (response == null || !response.has("data") || response.get("data").isJsonNull()) {
-                    return false;
-                }
-                JsonObject data = response.getAsJsonObject("data");
-                return data != null && data.has("__schema");
-            } catch (GripHttpClient.GripAuthException e) {
-                throw new CompletionException(e);
-            } catch (Exception e) {
-                httpClient.logError("Introspection availability check failed for " + endpoint, e);
-                return false;
+    private GripSchema fetch(String endpoint, GraphQLTransport transport, IntrospectionBypass bypass,
+                             String query, String label) throws GripHttpClient.GripAuthException {
+        try {
+            HttpRequestResponse response = httpClient.send(transport, endpoint, bypass.apply(query), label);
+            if (response == null || response.response() == null) {
+                return null;
             }
-        }, executor).orTimeout(60, TimeUnit.SECONDS);
+
+            String body = response.response().bodyToString();
+            GraphQLResponseAnalyzer.Analysis analysis = GraphQLResponseAnalyzer.analyzeIntrospectionResponse(
+                    response.response().statusCode(),
+                    response.response().headerValue("Content-Type"),
+                    body);
+
+            if (!analysis.isExpectedFieldAvailable()) {
+                return null;
+            }
+
+            JsonObject schemaJson = JsonParser.parseString(body).getAsJsonObject()
+                    .getAsJsonObject("data").getAsJsonObject("__schema");
+            return parseIntrospectionResult(schemaJson, endpoint, httpClient);
+        } catch (GripHttpClient.GripAuthException e) {
+            throw e;
+        } catch (Exception e) {
+            httpClient.logError(label + " failed for " + endpoint, e);
+            return null;
+        }
     }
 
-    public GripSchema parseIntrospectionResult(JsonObject schemaJson, String endpoint) {
+    private static void linkTypeReferences(GripSchema schema, JsonArray types) {
+        for (JsonElement typeElement : types) {
+            if (typeElement.isJsonNull() || !typeElement.isJsonObject()) {
+                continue;
+            }
+
+            JsonObject typeJson = typeElement.getAsJsonObject();
+            if (!typeJson.has("name") || typeJson.get("name").isJsonNull()) {
+                continue;
+            }
+
+            GripType type = schema.getType(typeJson.get("name").getAsString());
+            if (type == null) {
+                continue;
+            }
+
+            for (String name : referencedNames(typeJson, "interfaces")) {
+                GripType target = schema.getType(name);
+                if (target != null) {
+                    type.addInterface(target);
+                }
+            }
+            for (String name : referencedNames(typeJson, "possibleTypes")) {
+                GripType target = schema.getType(name);
+                if (target != null) {
+                    type.addPossibleType(target);
+                }
+            }
+        }
+    }
+
+    private static List<String> referencedNames(JsonObject typeJson, String member) {
+        if (!typeJson.has(member) || !typeJson.get(member).isJsonArray()) {
+            return List.of();
+        }
+
+        List<String> names = new ArrayList<>();
+        for (JsonElement element : typeJson.getAsJsonArray(member)) {
+            if (element.isJsonNull() || !element.isJsonObject()) {
+                continue;
+            }
+            JsonObject reference = element.getAsJsonObject();
+            if (reference.has("name") && !reference.get("name").isJsonNull()) {
+                names.add(reference.get("name").getAsString());
+            }
+        }
+        return names;
+    }
+
+    public static GripSchema parseIntrospectionResult(JsonObject schemaJson, String endpoint) {
+        return parseIntrospectionResult(schemaJson, endpoint, null);
+    }
+
+    public static GripSchema parseIntrospectionResult(JsonObject schemaJson, String endpoint,
+                                                      GripHttpClient logger) {
         GripSchema schema = new GripSchema();
         schema.setSourceEndpoint(endpoint);
 
@@ -225,17 +283,21 @@ public class IntrospectionHandler {
         if (schemaJson.has("types") && schemaJson.get("types").isJsonArray()) {
             JsonArray types = schemaJson.getAsJsonArray("types");
             for (JsonElement typeElement : types) {
+                if (typeElement.isJsonNull() || !typeElement.isJsonObject()) {
+                    continue;
+                }
                 GripType type = parseType(typeElement.getAsJsonObject());
                 if (type != null) {
                     schema.addType(type);
                 }
             }
+            linkTypeReferences(schema, types);
         }
 
         if (schemaJson.has("directives") && schemaJson.get("directives").isJsonArray()) {
             JsonArray directives = schemaJson.getAsJsonArray("directives");
             for (JsonElement directiveElement : directives) {
-                GripDirective directive = parseDirective(directiveElement.getAsJsonObject());
+                GripDirective directive = parseDirective(directiveElement.getAsJsonObject(), logger);
                 if (directive != null) {
                     schema.addDirective(directive);
                 }
@@ -245,7 +307,7 @@ public class IntrospectionHandler {
         return schema;
     }
 
-    private GripType parseType(JsonObject typeJson) {
+    private static GripType parseType(JsonObject typeJson) {
         String name = typeJson.has("name") && !typeJson.get("name").isJsonNull()
             ? typeJson.get("name").getAsString() : null;
         if (name == null) return null;
@@ -309,7 +371,7 @@ public class IntrospectionHandler {
         return type;
     }
 
-    private GripField parseField(JsonObject fieldJson) {
+    private static GripField parseField(JsonObject fieldJson) {
         String name = fieldJson.has("name") ? fieldJson.get("name").getAsString() : null;
         if (name == null) return null;
 
@@ -342,7 +404,7 @@ public class IntrospectionHandler {
         return field;
     }
 
-    private GripField parseInputField(JsonObject inputFieldJson) {
+    private static GripField parseInputField(JsonObject inputFieldJson) {
         String name = inputFieldJson.has("name") ? inputFieldJson.get("name").getAsString() : null;
         if (name == null) return null;
 
@@ -356,7 +418,7 @@ public class IntrospectionHandler {
         return field;
     }
 
-    private GripArgument parseArgument(JsonObject argJson) {
+    private static GripArgument parseArgument(JsonObject argJson) {
         String name = argJson.has("name") ? argJson.get("name").getAsString() : null;
         if (name == null) return null;
 
@@ -373,7 +435,7 @@ public class IntrospectionHandler {
         return arg;
     }
 
-    private GripTypeRef parseTypeRef(JsonObject typeJson) {
+    private static GripTypeRef parseTypeRef(JsonObject typeJson) {
         if (typeJson == null) return null;
 
         String kind = typeJson.has("kind") ? typeJson.get("kind").getAsString() : null;
@@ -416,7 +478,7 @@ public class IntrospectionHandler {
         return null;
     }
 
-    private GripDirective parseDirective(JsonObject directiveJson) {
+    private static GripDirective parseDirective(JsonObject directiveJson, GripHttpClient logger) {
         String name = directiveJson.has("name") ? directiveJson.get("name").getAsString() : null;
         if (name == null) return null;
 
@@ -433,7 +495,9 @@ public class IntrospectionHandler {
                     GripDirective.Location loc = GripDirective.Location.valueOf(locElement.getAsString());
                     directive.addLocation(loc);
                 } catch (IllegalArgumentException e) {
-                    httpClient.logError("Unsupported directive location " + locElement, e);
+                    if (logger != null) {
+                            logger.logError("Unsupported directive location " + locElement, e);
+                        }
                 }
             }
         }

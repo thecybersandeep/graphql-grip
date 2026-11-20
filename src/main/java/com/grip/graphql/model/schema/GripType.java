@@ -120,6 +120,30 @@ public class GripType {
         return name.startsWith("__");
     }
 
+    private void appendImplements(StringBuilder sb) {
+        if (interfaces.isEmpty()) {
+            return;
+        }
+        sb.append(" implements ");
+        for (int i = 0; i < interfaces.size(); i++) {
+            if (i > 0) {
+                sb.append(" & ");
+            }
+            sb.append(interfaces.get(i).getName());
+        }
+    }
+
+    private static void appendFieldBlock(StringBuilder sb, List<GripField> block) {
+        if (block.isEmpty()) {
+            return;
+        }
+        sb.append(" {\n");
+        for (GripField field : block) {
+            sb.append("  ").append(field.toGraphQLString()).append("\n");
+        }
+        sb.append("}");
+    }
+
     public String toSDL() {
         StringBuilder sb = new StringBuilder();
 
@@ -132,50 +156,41 @@ public class GripType {
 
             case OBJECT -> {
                 sb.append("type ").append(name);
-                if (!interfaces.isEmpty()) {
-                    sb.append(" implements ");
-                    for (int i = 0; i < interfaces.size(); i++) {
-                        if (i > 0) sb.append(" & ");
-                        sb.append(interfaces.get(i).getName());
-                    }
-                }
-                sb.append(" {\n");
-                for (GripField field : fields) {
-                    sb.append("  ").append(field.toGraphQLString()).append("\n");
-                }
-                sb.append("}");
+                appendImplements(sb);
+                appendFieldBlock(sb, fields);
             }
 
             case INTERFACE -> {
-                sb.append("interface ").append(name).append(" {\n");
-                for (GripField field : fields) {
-                    sb.append("  ").append(field.toGraphQLString()).append("\n");
-                }
-                sb.append("}");
+                sb.append("interface ").append(name);
+                appendImplements(sb);
+                appendFieldBlock(sb, fields);
             }
 
             case UNION -> {
-                sb.append("union ").append(name).append(" = ");
-                for (int i = 0; i < possibleTypes.size(); i++) {
-                    if (i > 0) sb.append(" | ");
-                    sb.append(possibleTypes.get(i).getName());
+                sb.append("union ").append(name);
+                if (!possibleTypes.isEmpty()) {
+                    sb.append(" = ");
+                    for (int i = 0; i < possibleTypes.size(); i++) {
+                        if (i > 0) sb.append(" | ");
+                        sb.append(possibleTypes.get(i).getName());
+                    }
                 }
             }
 
             case ENUM -> {
-                sb.append("enum ").append(name).append(" {\n");
-                for (GripEnumValue value : enumValues) {
-                    sb.append("  ").append(value.getName()).append("\n");
+                sb.append("enum ").append(name);
+                if (!enumValues.isEmpty()) {
+                    sb.append(" {\n");
+                    for (GripEnumValue value : enumValues) {
+                        sb.append("  ").append(value.getName()).append("\n");
+                    }
+                    sb.append("}");
                 }
-                sb.append("}");
             }
 
             case INPUT_OBJECT -> {
-                sb.append("input ").append(name).append(" {\n");
-                for (GripField field : inputFields) {
-                    sb.append("  ").append(field.toGraphQLString()).append("\n");
-                }
-                sb.append("}");
+                sb.append("input ").append(name);
+                appendFieldBlock(sb, inputFields);
             }
 
             default -> sb.append("# Unknown type kind: ").append(kind);

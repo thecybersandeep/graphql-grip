@@ -8,10 +8,6 @@ public class GripTypeRef {
             "String", "Int", "Float", "Boolean", "ID"
     );
 
-    private static final Set<String> COMMON_CUSTOM_SCALARS = Set.of(
-            "ID", "URL", "URI", "UUID", "JSON", "HTML", "XML", "JWT", "AWS", "ISO"
-    );
-
     private final String name;
     private final GripTypeKind kind;
     private final boolean isList;
@@ -31,60 +27,8 @@ public class GripTypeRef {
         return new GripTypeRef(name, determineKind(name), false, false, false);
     }
 
-    public static GripTypeRef nonNull(String name) {
-        return new GripTypeRef(name, determineKind(name), false, true, false);
-    }
-
-    public static GripTypeRef list(String name, boolean itemNonNull, boolean listNonNull) {
-        return new GripTypeRef(name, determineKind(name), true, listNonNull, itemNonNull);
-    }
-
-    public static GripTypeRef fromString(String typeString) {
-        if (typeString == null || typeString.isEmpty()) {
-            return null;
-        }
-
-        String s = typeString.trim();
-        boolean isNonNull = s.endsWith("!");
-        if (isNonNull) {
-            s = s.substring(0, s.length() - 1);
-        }
-
-        boolean isList = s.startsWith("[") && s.endsWith("]");
-        boolean isNonNullItem = false;
-
-        if (isList) {
-            s = s.substring(1, s.length() - 1);
-            if (s.endsWith("!")) {
-                isNonNullItem = true;
-                s = s.substring(0, s.length() - 1);
-            }
-        }
-
-        String baseName = s.trim();
-        GripTypeKind kind = determineKind(baseName);
-
-        return new GripTypeRef(baseName, kind, isList, isNonNull, isNonNullItem);
-    }
-
     private static GripTypeKind determineKind(String name) {
-        if (name == null) return GripTypeKind.OBJECT;
-
-        if (BUILT_IN_SCALARS.contains(name)) {
-            return GripTypeKind.SCALAR;
-        }
-
-        if (COMMON_CUSTOM_SCALARS.contains(name)) {
-            return GripTypeKind.SCALAR;
-        }
-        if (name.endsWith("Input")) {
-            return GripTypeKind.INPUT_OBJECT;
-        }
-
-        if (name.endsWith("Enum") || (name.equals(name.toUpperCase()) && name.length() > 4)) {
-            return GripTypeKind.ENUM;
-        }
-        return GripTypeKind.OBJECT;
+        return BUILT_IN_SCALARS.contains(name) ? GripTypeKind.SCALAR : GripTypeKind.OBJECT;
     }
 
     public String getName() {

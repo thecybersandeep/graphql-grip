@@ -128,6 +128,7 @@ public class SchemaReconstructor {
 
             } catch (Exception e) {
                 reportProgress("Error during reconstruction: " + e.getMessage());
+                httpClient.logError("Schema reconstruction failed for " + endpoint, e);
                 return createEmptySchema(endpoint);
             }
         }, executor);
@@ -152,6 +153,7 @@ public class SchemaReconstructor {
                     if (!found.isEmpty()) successfulProbes.incrementAndGet();
                 } catch (Exception e) {
                     reportProgress("Probe failed: " + e.getMessage());
+                    httpClient.logError("Root type probe failed for " + rootType, e);
                 } finally {
                     semaphore.release();
                     delay();
@@ -462,6 +464,7 @@ public class SchemaReconstructor {
             }
         } catch (IOException e) {
             reportProgress("Error loading wordlist: " + e.getMessage());
+            httpClient.logError("Could not load the reconstruction wordlist", e);
             return getDefaultWordlist();
         }
 

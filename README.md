@@ -3,7 +3,7 @@
 [![Java](https://img.shields.io/badge/Java-17%2B-ED8B00?style=flat&logo=openjdk&logoColor=white)](https://openjdk.org/)
 [![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Montoya%20API-FF6633?style=flat)](https://portswigger.net/burp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.0.0-green.svg)](../../releases)
+[![Version](https://img.shields.io/badge/Version-3.0.0-green.svg)](../../releases)
 
 Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint backends, and generate attack payloads from within Burp.
 
@@ -25,7 +25,7 @@ Burp Suite extension for GraphQL security testing. Fetch schemas, fingerprint ba
 
 ## Installation
 
-Grab `graphql-grip-2.0.0.jar` from [Releases](../../releases), or build from source. Go to Extensions > Add in Burp, select the JAR.
+Grab `graphql-grip-3.0.0.jar` from [Releases](../../releases), or build from source. Go to Extensions > Add in Burp, select the JAR.
 
 Requires Burp Suite 2026.7+ and Java 17+.
 
@@ -83,7 +83,7 @@ chmod +x ./gradlew
 
 Windows: `gradlew.bat jar`
 
-Output: `build/libs/graphql-grip-2.0.0.jar`
+Output: `build/libs/graphql-grip-3.0.0.jar`
 
 ## Project Structure
 
@@ -92,9 +92,7 @@ src/main/java/com/grip/graphql/
 ├── GripExtender.java          # Burp extension entry point
 ├── GripCore.java              # Core coordinator
 ├── GripConfig.java            # Configuration management
-├── api/                       # Interfaces
 ├── editor/                    # Repeater tab integration
-├── event/                     # Event bus system
 ├── http/                      # HTTP client with rate limiting
 ├── model/                     # Data models (schema, types, fields)
 ├── schema/                    # Introspection & reconstruction
@@ -103,6 +101,18 @@ src/main/java/com/grip/graphql/
 ```
 
 ## Changelog
+
+### v3.0.0
+
+Attack payloads are built from a parsed GraphQL document, so every payload declares the variables it references and carries their captured values. Each attack button was audited by parsing its output; field duplication, the depth probe, directive overloading, mutation fragments, the inline fragment bypass, the engine fingerprint and the persisted query hash were producing invalid or unusable queries and were corrected.
+
+The request format buttons now change the request. Previously they set an internal field that Burp never read, so GET, URL encoded and multipart did nothing, and switching formats left the operation in the URL so the query was sent twice.
+
+SDL import was a regular expression that imported three of eleven types from a typical schema, skipping anything declaring `implements` along with every interface, union, enum, input and scalar. It now uses a type system parser. Introspection no longer discards interfaces and union members, and SDL export round trips back through import.
+
+The schema graph places types in layers by distance from the root types and draws edges for field types, argument types, input fields, interfaces and union members, with focus for one type's neighbourhood.
+
+Cancel now stops a running scan, and endpoint discovery and fingerprinting mark the scanner busy so they cannot be fired repeatedly. Payload sizes, ranges and defaults are defined once and shared by the settings panel and the configuration store. The unused module and event packages, twenty three configuration keys and three HTTP client methods were removed.
 
 ### v2.0.0
 

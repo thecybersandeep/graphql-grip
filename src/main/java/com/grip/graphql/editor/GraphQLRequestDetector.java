@@ -87,6 +87,97 @@ final class GraphQLRequestDetector {
         return null;
     }
 
+    static JsonObject extractEnvelope(String method, String path, String contentType, String body) {
+        JsonObject fromUrl = envelopeFromParameters(path);
+        if (fromUrl != null) {
+            return fromUrl;
+        }
+
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+
+        String normalizedType = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
+
+        if (normalizedType.contains("application/x-www-form-urlencoded")) {
+            return envelopeFromParameters("?" + body);
+        }
+
+        if (normalizedType.contains("multipart/form-data")) {
+            Matcher operationsPart = MULTIPART_OPERATIONS.matcher(body);
+            if (operationsPart.find()) {
+                return envelopeFromJson(operationsPart.group(1).trim());
+            }
+            Matcher queryPart = MULTIPART_QUERY.matcher(body);
+            if (queryPart.find()) {
+                JsonObject envelope = new JsonObject();
+                envelope.addProperty("query", queryPart.group(1).trim());
+                return envelope;
+            }
+            return null;
+        }
+
+        return envelopeFromJson(body);
+    }
+
+    private static JsonObject envelopeFromParameters(String value) {
+        String query = parameterValue(value, "query");
+        String operationName = parameterValue(value, "operationName");
+        String variables = parameterValue(value, "variables");
+
+        if (query == null && variables == null) {
+            return null;
+        }
+
+        JsonObject envelope = new JsonObject();
+        if (query != null && !query.isBlank()) {
+            envelope.addProperty("query", query);
+        }
+        if (operationName != null && !operationName.isBlank()) {
+            envelope.addProperty("operationName", operationName);
+        }
+        addJsonMember(envelope, "variables", variables);
+        return envelope;
+    }
+
+    private static JsonObject envelopeFromJson(String body) {
+        String trimmed = body == null ? "" : body.trim();
+        if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+            return null;
+        }
+
+        try {
+            JsonElement parsed = JsonParser.parseString(trimmed);
+            if (parsed.isJsonObject()) {
+                return parsed.getAsJsonObject();
+            }
+            if (parsed.isJsonArray()) {
+                for (JsonElement item : parsed.getAsJsonArray()) {
+                    if (item.isJsonObject()) {
+                        return item.getAsJsonObject();
+                    }
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    private static void addJsonMember(JsonObject envelope, String name, String rawJson) {
+        if (rawJson == null || rawJson.isBlank()) {
+            return;
+        }
+        try {
+            JsonElement parsed = JsonParser.parseString(rawJson);
+            if (parsed.isJsonObject()) {
+                envelope.add(name, parsed.getAsJsonObject());
+            }
+        } catch (RuntimeException ignored) {
+            envelope.remove(name);
+        }
+    }
+
     private static boolean isValidJson(String value) {
         try {
             JsonParser.parseString(value);
@@ -172,7 +263,7 @@ final class GraphQLRequestDetector {
         return value != null && GRAPHQL_DOCUMENT.matcher(value).find();
     }
 
-    private static String parameterValue(String value, String requestedName) {
+    static String parameterValue(String value, String requestedName) {
         if (value == null) {
             return null;
         }

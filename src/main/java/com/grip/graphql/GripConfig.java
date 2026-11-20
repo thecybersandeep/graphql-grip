@@ -16,19 +16,6 @@ public class GripConfig {
     private final Map<String, Object> defaults;
     private final Map<String, Consumer<Object>> hooks;
 
-    public static final String DISCOVERY_ENABLED = "discovery.enabled";
-    public static final String DISCOVERY_AUTO_DETECT = "discovery.auto_detect";
-
-    public static final String SCHEMA_CODEGEN_DEPTH = "schema.codegen.depth";
-    public static final String SCHEMA_CODEGEN_PAD = "schema.codegen.pad";
-    public static final String SCHEMA_RECONSTRUCTION_BUCKET_SIZE = "schema.reconstruction.bucket_size";
-    public static final String SCHEMA_RECONSTRUCTION_CONCURRENCY = "schema.reconstruction.concurrency";
-
-    public static final String SECURITY_DOS_ALIAS_COUNT = "security.dos.alias_count";
-    public static final String SECURITY_DOS_BATCH_COUNT = "security.dos.batch_count";
-    public static final String SECURITY_DOS_FIELD_COUNT = "security.dos.field_count";
-    public static final String SECURITY_DOS_DIRECTIVE_COUNT = "security.dos.directive_count";
-
     public static final String ATTACK_ALIAS_COUNT = "grip.attack.aliases";
     public static final String ATTACK_BATCH_COUNT = "grip.attack.batch";
     public static final String ATTACK_FIELD_COUNT = "grip.attack.fields";
@@ -36,24 +23,8 @@ public class GripConfig {
     public static final String ATTACK_DEPTH_COUNT = "grip.attack.depth";
     public static final String ATTACK_FRAGMENT_COUNT = "grip.attack.fragments";
 
-    public static final String POI_ENABLED = "poi.enabled";
-    public static final String POI_DEPTH = "poi.depth";
-    public static final String POI_AUTH = "poi.auth";
-    public static final String POI_PII = "poi.pii";
-    public static final String POI_PAYMENT = "poi.payment";
-    public static final String POI_DATABASE = "poi.database";
-
-    public static final String UI_THEME = "ui.theme";
-    public static final String UI_HIGHLIGHT_COLOR = "ui.highlight_color";
-
-    public static final String HTTP_TIMEOUT_MS = "http.timeout_ms";
-    public static final String HTTP_MAX_CONCURRENT = "http.max_concurrent";
-    public static final String HTTP_REQUEST_DELAY_MS = "http.request_delay_ms";
     public static final String HTTP_USER_AGENT = "http.user_agent";
     public static final String HTTP_INHERIT_AUTH_HEADERS = "http.inherit_auth_headers";
-
-    public static final String SECURITY_DEPTH_LEVELS = "security.depth_levels";
-    public static final String SECURITY_CIRCULAR_DEPTH = "security.circular_depth";
 
     private GripConfig(MontoyaApi api) {
         this.api = api;
@@ -76,44 +47,12 @@ public class GripConfig {
     private Map<String, Object> initializeDefaults() {
         Map<String, Object> defaults = new ConcurrentHashMap<>();
 
-        defaults.put(DISCOVERY_ENABLED, true);
-        defaults.put(DISCOVERY_AUTO_DETECT, true);
+        for (AttackPayloadSetting setting : AttackPayloadSetting.values()) {
+            defaults.put(setting.key(), setting.defaultValue());
+        }
 
-        defaults.put(SCHEMA_CODEGEN_DEPTH, 2);
-        defaults.put(SCHEMA_CODEGEN_PAD, 4);
-        defaults.put(SCHEMA_RECONSTRUCTION_BUCKET_SIZE, 64);
-        defaults.put(SCHEMA_RECONSTRUCTION_CONCURRENCY, 8);
-
-        defaults.put(SECURITY_DOS_ALIAS_COUNT, 100);
-        defaults.put(SECURITY_DOS_BATCH_COUNT, 10);
-        defaults.put(SECURITY_DOS_FIELD_COUNT, 500);
-        defaults.put(SECURITY_DOS_DIRECTIVE_COUNT, 10);
-
-        defaults.put(ATTACK_ALIAS_COUNT, 100);
-        defaults.put(ATTACK_BATCH_COUNT, 10);
-        defaults.put(ATTACK_FIELD_COUNT, 500);
-        defaults.put(ATTACK_DIRECTIVE_COUNT, 50);
-        defaults.put(ATTACK_DEPTH_COUNT, 10);
-        defaults.put(ATTACK_FRAGMENT_COUNT, 50);
-
-        defaults.put(POI_ENABLED, true);
-        defaults.put(POI_DEPTH, 4);
-        defaults.put(POI_AUTH, true);
-        defaults.put(POI_PII, true);
-        defaults.put(POI_PAYMENT, true);
-        defaults.put(POI_DATABASE, true);
-
-        defaults.put(UI_THEME, "auto");
-        defaults.put(UI_HIGHLIGHT_COLOR, "ORANGE");
-
-        defaults.put(HTTP_TIMEOUT_MS, 30000);
-        defaults.put(HTTP_MAX_CONCURRENT, 10);
-        defaults.put(HTTP_REQUEST_DELAY_MS, 100);
         defaults.put(HTTP_USER_AGENT, "");
         defaults.put(HTTP_INHERIT_AUTH_HEADERS, true);
-
-        defaults.put(SECURITY_DEPTH_LEVELS, 15);
-        defaults.put(SECURITY_CIRCULAR_DEPTH, 10);
 
         return defaults;
     }

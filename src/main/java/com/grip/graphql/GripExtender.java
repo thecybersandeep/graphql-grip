@@ -7,7 +7,7 @@ import burp.api.montoya.extension.ExtensionUnloadingHandler;
 public class GripExtender implements BurpExtension, ExtensionUnloadingHandler {
 
     private static final String EXTENSION_NAME = "GraphQL Grip";
-    private static final String EXTENSION_VERSION = "2.0.0";
+    private static final String EXTENSION_VERSION = "3.0.0";
     private GripCore gripCore;
 
     @Override

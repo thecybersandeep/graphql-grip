@@ -142,10 +142,6 @@ public class GripHttpClient {
         return value.substring(0, 6) + "..." + value.substring(value.length() - 6);
     }
 
-    public void clearInheritedHeaders() {
-        inheritedHeaders.clear();
-    }
-
     public Map<String, String> getInheritedHeaders() {
         return new HashMap<>(inheritedHeaders);
     }
@@ -248,33 +244,6 @@ public class GripHttpClient {
                e.getMessage().contains("timeout");
     }
 
-    public HttpRequestResponse sendRaw(String endpoint, String method, String body,
-                                        Map<String, String> headers) throws Exception {
-        rateLimiter.acquire();
-        try {
-            enforceDelay();
-
-            HttpRequest request = HttpRequest.httpRequestFromUrl(endpoint)
-                    .withMethod(method);
-
-            if (body != null && !body.isEmpty()) {
-                request = request.withBody(body);
-            }
-
-            request = addAllHeaders(request, headers);
-
-            HttpRequestResponse response = sendWithTimeout(request);
-            checkResponseAuth(response, endpoint);
-            return response;
-
-        } catch (Exception e) {
-            logError("Raw request failed for " + endpoint + ": " + e.getMessage());
-            throw e;
-        } finally {
-            rateLimiter.release();
-        }
-    }
-
     public HttpRequestResponse sendGet(String endpoint, String query) throws Exception {
         return sendGet(endpoint, query, null);
     }
@@ -284,15 +253,7 @@ public class GripHttpClient {
         try {
             enforceDelay();
 
-            String encodedQuery = java.net.URLEncoder.encode(query, "UTF-8");
-            String url = endpoint + (endpoint.contains("?") ? "&" : "?") + "query=" + encodedQuery;
-
-            HttpRequest request = HttpRequest.httpRequestFromUrl(url)
-                    .withMethod("GET")
-                    .withUpdatedHeader("Accept", "application/json")
-                    .withUpdatedHeader("User-Agent", defaultHeaders.get("User-Agent"));
-
-            request = applyInheritedAndCustomHeaders(request, headers);
+            HttpRequest request = buildRequest(GraphQLTransport.GET, endpoint, query, headers);
 
             HttpRequestResponse response = sendWithTimeout(request);
             checkResponseAuth(response, endpoint);
@@ -315,17 +276,7 @@ public class GripHttpClient {
         try {
             enforceDelay();
 
-            String encodedQuery = java.net.URLEncoder.encode(query, "UTF-8");
-            String body = "query=" + encodedQuery;
-
-            HttpRequest request = HttpRequest.httpRequestFromUrl(endpoint)
-                    .withMethod("POST")
-                    .withUpdatedHeader("Content-Type", "application/x-www-form-urlencoded")
-                    .withUpdatedHeader("Accept", "application/json")
-                    .withUpdatedHeader("User-Agent", defaultHeaders.get("User-Agent"))
-                    .withBody(body);
-
-            request = applyInheritedAndCustomHeaders(request, headers);
+            HttpRequest request = buildRequest(GraphQLTransport.POST_FORM, endpoint, query, headers);
 
             HttpRequestResponse response = sendWithTimeout(request);
             checkResponseAuth(response, endpoint);
@@ -341,24 +292,6 @@ public class GripHttpClient {
 
     public void setDefaultHeader(String name, String value) {
         defaultHeaders.put(name, value);
-    }
-
-    public void removeDefaultHeader(String name) {
-        defaultHeaders.remove(name);
-    }
-
-    public void setUserAgent(String userAgent) {
-        if (userAgent != null && !userAgent.isEmpty()) {
-            defaultHeaders.put("User-Agent", userAgent);
-        }
-    }
-
-    public JsonObject sendQueryAndLog(String endpoint, String query, String source) throws Exception {
-        HttpRequestResponse response = sendQueryWithLog(endpoint, query, source);
-        if (response == null || response.response() == null) {
-            throw new GripHttpException("No response received from server", endpoint, null);
-        }
-        return parseJsonObjectResponse(response, endpoint);
     }
 
     private JsonObject parseJsonObjectResponse(HttpRequestResponse response, String endpoint)
@@ -416,12 +349,6 @@ public class GripHttpClient {
         }
     }
 
-    public HttpRequestResponse sendRawWithLog(String endpoint, String method, String body,
-                                               Map<String, String> headers, String source) throws Exception {
-        logDebug("[" + source + "] Sending " + method + " to " + endpoint);
-        return sendRaw(endpoint, method, body, headers);
-    }
-
     public HttpRequestResponse sendGetWithLog(String endpoint, String query, String source) throws Exception {
         logDebug("[" + source + "] Sending GET to " + endpoint);
         return sendGet(endpoint, query);
@@ -430,6 +357,41 @@ public class GripHttpClient {
     public HttpRequestResponse sendPostUrlEncodedWithLog(String endpoint, String query, String source) throws Exception {
         logDebug("[" + source + "] Sending POST URL-encoded to " + endpoint);
         return sendPostUrlEncoded(endpoint, query);
+    }
+
+    public HttpRequestResponse send(GraphQLTransport transport, String endpoint, String query, String source)
+            throws Exception {
+        return switch (transport) {
+            case POST_JSON -> sendQueryWithLog(endpoint, query, source);
+            case GET -> sendGetWithLog(endpoint, query, source);
+            case POST_FORM -> sendPostUrlEncodedWithLog(endpoint, query, source);
+        };
+    }
+
+    public HttpRequest buildRequest(GraphQLTransport transport, String endpoint, String query) {
+        return buildRequest(transport, endpoint, query, null);
+    }
+
+    private HttpRequest buildRequest(GraphQLTransport transport, String endpoint, String query,
+                                     Map<String, String> customHeaders) {
+        if (transport == GraphQLTransport.POST_JSON) {
+            HttpRequest request = buildPostRequest(endpoint, transport.body(query));
+            return customHeaders == null ? request : applyInheritedAndCustomHeaders(request, customHeaders);
+        }
+
+        HttpRequest request = HttpRequest.httpRequestFromUrl(transport.url(endpoint, query))
+                .withMethod(transport.method());
+
+        if (transport.carriesBody()) {
+            request = request.withBody(transport.body(query));
+        }
+
+        request = addHeadersExceptContentType(request, customHeaders);
+
+        if (transport.carriesBody()) {
+            request = request.withUpdatedHeader("Content-Type", transport.contentType());
+        }
+        return request;
     }
 
     public HttpRequest buildPostRequest(String endpoint, String body) {
@@ -452,6 +414,16 @@ public class GripHttpClient {
 
     private HttpRequest addAllHeaders(HttpRequest request, Map<String, String> customHeaders) {
         for (Map.Entry<String, String> header : defaultHeaders.entrySet()) {
+            request = request.withUpdatedHeader(header.getKey(), header.getValue());
+        }
+        return applyInheritedAndCustomHeaders(request, customHeaders);
+    }
+
+    private HttpRequest addHeadersExceptContentType(HttpRequest request, Map<String, String> customHeaders) {
+        for (Map.Entry<String, String> header : defaultHeaders.entrySet()) {
+            if ("Content-Type".equalsIgnoreCase(header.getKey())) {
+                continue;
+            }
             request = request.withUpdatedHeader(header.getKey(), header.getValue());
         }
         return applyInheritedAndCustomHeaders(request, customHeaders);

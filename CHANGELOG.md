@@ -2,7 +2,7 @@
 
 ## 3.0.0
 
-Unreleased.
+Released 20 November 2026.
 
 ### Request editor
 
